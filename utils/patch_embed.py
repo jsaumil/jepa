@@ -18,4 +18,4 @@ class PatchEmbed3D(nn.Module):
     """
     Image to Patch Embedding
     """
-    def 
+    def __init__(self, patch_size=16, tub)
