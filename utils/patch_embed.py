@@ -4,10 +4,10 @@ class PatchEmbed(nn.Module):
     """
     Image to Patch Emvedding
     """
-    def __init__(self, patch_size=16, in_chans=3, embed_dim=768):
+    def __init__(self, patch_size=16, in_chan=3, embed_dim=768):
         super().__init__()
         self.patch_size = patch_size
-        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.proj = nn.Conv2d(in_chan, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
         B, C, H, W = x.shape
@@ -18,4 +18,4 @@ class PatchEmbed3D(nn.Module):
     """
     Image to Patch Embedding
     """
-    def __init__(self, patch_size=16, tubelet_size=2)
+    def __init__(self, patch_size=16, tubelet_size=2, in_chan=3, embed)
