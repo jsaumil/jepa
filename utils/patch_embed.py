@@ -23,4 +23,4 @@ class PatchEmbed3D(nn.Module):
         self.patch_size = patch_size
         self.tubelet_size = tubelet_size
 
-        self.proj = nn.Conv3d(in_chan)
+        self.proj = nn.Conv3d(in_channels = in_chan, out_channels=embed_dim, kernel)
