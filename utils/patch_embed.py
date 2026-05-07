@@ -21,3 +21,6 @@ class PatchEmbed3D(nn.Module):
     def __init__(self, patch_size=16, tubelet_size=2, in_chan=3, embed_dim=768):
         super().__init__()
         self.patch_size = patch_size
+        self.tubelet_size = tubelet_size
+
+        self.proj = nn.Conv3d(in_chan)
