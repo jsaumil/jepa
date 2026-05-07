@@ -15,4 +15,7 @@ class PatchEmbed(nn.Module):
         return x
     
 class PatchEmbed3D(nn.Module):
-    """"""
+    """
+    Image to Patch Embedding
+    """
+    def 
