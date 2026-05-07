@@ -28,4 +28,5 @@ class PatchEmbed3D(nn.Module):
                     stride=(tubelet_size, patch_size, patch_size)
                     )
         
-    def forward
+    def forward(self, x, **kwargs):
+        B, C, T, H, W 
