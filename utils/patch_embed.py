@@ -24,8 +24,8 @@ class PatchEmbed3D(nn.Module):
         self.tubelet_size = tubelet_size
 
         self.proj = nn.Conv3d(in_channels=in_chan, out_channels=embed_dim, 
-                              kernel_size=(tubelet_size, patch_size, patch_size), 
-                              stride=(tubelet_size, patch_size, patch_size)
-        )
-
+                    kernel_size=(tubelet_size, patch_size, patch_size), 
+                    stride=(tubelet_size, patch_size, patch_size)
+                    )
         
+    def forward
