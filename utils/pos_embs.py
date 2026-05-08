@@ -40,4 +40,4 @@ def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
 
     emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim//2, grid_h)
     emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim//2, grid_w)
-    pos_embed = np.concatenate([emb_h, emb_w], axis=1)
+    pos_embed = np.concatenate([emb_h, emb_w], axis=1) # ()
