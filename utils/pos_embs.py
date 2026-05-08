@@ -30,3 +30,4 @@ def get_1d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
     grid = np.arange(grid_size, dtype=float)
     pos_embed = get_1d_sincos_pos_embed_from_grid(embed_dim, grid)
     if cls_token:
+        pos_embed = np.concatenate([np.zero([1, embed_dim]), pos_embed])
