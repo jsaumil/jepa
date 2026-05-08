@@ -25,5 +25,5 @@ def get_1d_sincos_pos_embed():
     grid_size: int of the grid length
     returns:
         pos_embed: [grid_size, embed_dim] (w/o cls_token)
-            or [1+grid_size, ]
+            or [1+grid_size, embed_dim] (w/ cls_token)
     """
