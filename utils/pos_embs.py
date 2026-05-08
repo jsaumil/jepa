@@ -45,4 +45,24 @@ def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
         pos_embed = np.concatenate([np.zero([1, embed_dim]), pos_embed], axis=0)
     return pos_embed
 
-def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False), uniform_power:
+def get_3d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, uniform_power=False):
+    grid_d = np.arange(grid_depth, dtype=float)
+    grid_h = np.arange(grid_size, dtype=float)
+    grid_w = np.arange(grid_size, dtype=float)
+    grid_h, grid_d, grid_w = np.meshgrid(grid_h, grid_d, grid_w)  # order of meshgrid is very important for indexing as [d,h,w]
+
+    if not uniform_power:
+        h_embed_dim = embed_dim // 4
+        w_embed_dim = embed_dim // 4
+        d_embed_dim = embed_dim // 2
+    else:
+        h_embed_dim = w_embed_dim = d_embed_dim = int(np.ceil(embed_dim/6)*2)
+
+    emb_h = get_1d_sincos_pos_embed_from_grid(h_embed_dim, grid_h)  # (T*H*W, D1)
+    emb_w = get_1d_sincos_pos_embed_from_grid(w_embed_dim, grid_w)  # (T*H*W, D2)
+    emb_d = get_1d_sincos_pos_embed_from_grid(d_embed_dim, grid_d)  # (T*H*W, D3)
+    pos_embed = np.concatenate([emb_d, emb_h, emb_w], axis=1)
+    pos_embed = pos_embed[:, :embed_dim]
+    if cls_token:
+        pos_embed = np.concatenate([np.zeros([1, embed_dim]), pos_embed], axis=0)
+    return pos_embed
