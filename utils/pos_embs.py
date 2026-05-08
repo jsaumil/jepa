@@ -27,3 +27,5 @@ def get_1d_sincos_pos_embed():
         pos_embed: [grid_size, embed_dim] (w/o cls_token)
             or [1+grid_size, embed_dim] (w/ cls_token)
     """
+    grid = np.arange(grid_size, dtype=float)
+    pos_embed = 
