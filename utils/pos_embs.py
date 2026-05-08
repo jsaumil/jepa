@@ -12,7 +12,9 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     omega = 1. / 10000**omega  # (D/2,)
 
     pos = pos.reshape(-1) # (M,)
-    out = 
+    out = np.einsum('m,d->md', pos, omega) # (M, D/2), outer product
+
+    emb
 
 def get_1d_sincos_pos_embed():
     pass
