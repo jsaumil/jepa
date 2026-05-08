@@ -20,4 +20,10 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     return np.concatenate([emb_sin, emb_cos], axis=1) # (M, D)
 
 def get_1d_sincos_pos_embed():
-    pass
+    """
+    embed_dim: output dimension for each position
+    grid_size: int of the grid length
+    returns:
+        pos_embed: [grid_size, embed_dim] (w/o cls_token)
+            or [1+grid_size, ]
+    """
