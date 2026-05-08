@@ -36,4 +36,6 @@ def get_1d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
     grid_h = np.arange(grid_size, dtype=float)
     grid_w = np.arange(grid_size, dtype=float)
-    grid_w, grid_h = np.meshgrid(grid_w, grid_h) # order of meshgrid is very 
+    grid_w, grid_h = np.meshgrid(grid_w, grid_h) # order of meshgrid is very important for indexing as [h, w]
+
+    emb_h = get
