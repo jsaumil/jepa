@@ -45,7 +45,7 @@ def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
         pos_embed = np.concatenate([np.zero([1, embed_dim]), pos_embed], axis=0)
     return pos_embed
 
-def get_3d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, uniform_power=False):
+def get_3d_sincos_pos_embed(embed_dim, grid_size, grid_depth, cls_token=False, uniform_power=False):
     grid_d = np.arange(grid_depth, dtype=float)
     grid_h = np.arange(grid_size, dtype=float)
     grid_w = np.arange(grid_size, dtype=float)
