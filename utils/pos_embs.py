@@ -14,7 +14,10 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     pos = pos.reshape(-1) # (M,)
     out = np.einsum('m,d->md', pos, omega) # (M, D/2), outer product
 
-    emb
+    emb_sin = np.sin(out) # (M, D/2)
+    emb_cos = np.cos(out) # (M, D/2)
+
+    return np.concatenate([emb_sin, emb_])
 
 def get_1d_sincos_pos_embed():
     pass
