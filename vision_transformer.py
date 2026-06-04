@@ -7,6 +7,7 @@ import torch.nn as nn
 from utils.patch_embed import PatchEmbed, PatchEmbed3D
 from utils.modules import Block
 from utils.pos_embs import get_2d_sincos_pos_embed, get_3d_sincos_pos_embed
+from mask.utils import apply_masks
 
 class VisionTransformer(nn.Module):
     """Vision Transformer"""
@@ -66,3 +67,63 @@ class VisionTransformer(nn.Module):
             self.num_patches = (
                 (img_size // patch_size) ** 2
             )
+
+        # Position embedding
+        self.uniform_power = uniform_power
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, self.num_patches, embed_dim),
+            requires_grad=False
+        )
+
+        # Attention Blocks
+        self.blocks = nn.ModuleList([
+            Block(
+                dim=embed_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                qk_scale=qk_scale,
+                drop=drop_rate,
+                act_layer=nn.GELU,
+                grid_size=grid_size,
+                grid_depth=grid_depth,
+                attn_drop=attn_drop_rate,
+                norm_layer=norm_layer,
+            )
+            for i in range(depth)])
+        self.norm = norm_layer(embed_dim)
+
+        # --- initialize weights ---
+        
+    def forward(self, x, masks=None):
+        """
+        x: input image/video
+        mask: indices of patch tokens to mask (remove)
+        """
+        if masks is not None and not isinstance(masks, list):
+            masks = [masks]
+
+        # Tokenize input
+        pos_embed = self.pos_embed
+        x = self.patch_embed(x) # [B, num_patches, embed_dim]
+        if pos_embed is not None:
+            x += pos_embed
+        B, N, D = x.shape
+
+        # Mask away unwanted tokens
+        if masks is not None:
+            x = apply_masks(x, masks)
+            masks = torch.cat(masks, dim=0)
+
+        outs = []
+        for i, blk in enumerate(self.blocks):
+            x = blk(x, mask=masks)
+            if self.out_layers is not None and i in self.out_layers:
+                outs.append(self.norm(x))
+
+        if self.out_layers is None:
+            return outs
+        if self.norm is not None:
+            x = self.norm(x)
+
+        return x
