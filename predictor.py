@@ -25,25 +25,11 @@ class VisionTransformerPredictor(nn.Module):
             drop_rate=0.0,
             attn_drop_rate=0.0,
             norm_layer=nn.LayerNorm,
-            init_std=0.02,
-            uniform_power=False,
-            use_mask_tokens=False,
-            num_mask_tokens=2,
-            zero_init_mask_tokens=True
+            **kwargs
             ):
         super().__init__()
         # map input to predictor dimension
         self.predictor_embed = nn.Linear(embed_dim, predictor_embed_dim, bias=True)
-
-        # Mask tokens
-        self.mask_tokens = None
-        self.num_mask_tokens = 0
-        if use_mask_tokens:
-            self.num_mask_tokens = num_mask_tokens
-            self.mask_tokens = nn.ParameterList([
-                nn.Parameter(torch.zero(1,1,self.predictor_embed_dim, bias=True))
-                for i in range(num_mask_tokens)
-            ])
 
         self.input_size = img_size
         self.patch_size = patch_size
@@ -53,21 +39,6 @@ class VisionTransformerPredictor(nn.Module):
 
         grid_size = self.input_size // self.patch_size
         grid_depth = self.num_frames // self.tubelet_size
-        if self.is_video:
-            self.num_patches = num_patches = (
-                (num_frames // tubelet_size)
-                * (img_size // patch_size) ** 2
-            )
-        else:
-            self.num_patches = num_patches = (
-                (img_size // patch_size) ** 2
-            )
-
-        self.uniform_power = uniform_power
-        self.predictor_pos_embed = nn.Parameter(
-            torch.zero(1,num_patches, predictor_embed_dim),
-            requires_grad=False
-        )
 
         # Attention Blocks
         self.predictor_blocks = nn.ModuleList([
@@ -88,29 +59,27 @@ class VisionTransformerPredictor(nn.Module):
         self.predictor_norm = norm_layer(predictor_embed_dim)
         self.predictor_proj = nn.Linear(predictor_embed_dim, embed_dim, bias=True)
 
-
-    def forward(self, ctxt, tgt, masks_ctxt, masks_tgt, mask_index=1):
+    def forward(self, ctxt, tgt, masks_ctxt, masks_tgt):
         """
-        ctxt: context tokens
-        tgt: target tokens
-        masks_ctxt: indices of context tokens in input
-        masks_tgt: indices of target tokens in input
+        :param ctxt: context tokens
+        :param tgt: target tokens
+        :param masks_ctxt: indices of context tokens in input
+        :param masks_tgt: indices of target tokens in input
         """
-        if not isinstance(masks_ctxt, list):
-            masks_ctxt = [masks_ctxt]
-        if not isinstance(masks_tgt, list):
-            masks_tgt = [masks_tgt]
 
-        # Batch Size
-        B = len(ctxt)//len(masks_ctxt)
+        assert (masks_ctxt is not None) and (masks_tgt is not None), 'Cannot run predictor without mask indices'
+        ctxt = self.predictor_embed(ctxt) 
+        tgt = self.predictor_embed(tgt) 
+        _, N_ctxt, D = ctxt.shape
+        x = torch.cat([ctxt, tgt], dim=1)
 
-        # Map context tokens to predictor dimensions
-        x = self.predictor_embed(ctxt)
-        _, N_ctxt, D = x.shape
+        # Fwd prop
+        for blk in self.predictor_blocks:
+            x = blk(x)
+        x = self.predictor_norm(x)
 
-        # context pos
-        # tgt chahiye (image me mask k hi tgt hai)
-        # 
+        # Return output corresponding to target tokens
+        x = x[:, N_ctxt:]
+        x = self.predictor_proj(x)
 
-        # add positional embedding to ctxt tokens
-        # if self.predictor_pos_embed is not None:
+        return x

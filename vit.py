@@ -17,7 +17,6 @@ class VisionTransformer(nn.Module):
         patch_size=16,
         num_frames=1,
         tubelet_size=2,
-        in_chans=3,
         embed_dim=768,
         depth=12,
         num_heads=12,
@@ -27,15 +26,11 @@ class VisionTransformer(nn.Module):
         drop_rate=0.0,
         attn_drop_rate=0.0,
         norm_layer=nn.LayerNorm,
-        int_std=0.02,
-        out_layers=None,
-        uniform_power=False,
         **kwargs
     ):
         super().__init__()
         self.num_features = self.embed_dim = embed_dim
         self.num_heads = num_heads
-        self.out_layers = out_layers
 
         self.input_size = img_size
         self.patch_size = patch_size
@@ -45,35 +40,6 @@ class VisionTransformer(nn.Module):
 
         grid_size = self.input_size // self.patch_size
         grid_depth = self.num_frames // self.tubelet_size
-
-        # Tokenize pixels with convolution
-        if self.is_video:
-            self.patch_embed = PatchEmbed3D(
-                patch_size=patch_size,
-                tubelet_size=tubelet_size,
-                in_chans=in_chans,
-                embed_dim=embed_dim
-            )
-            self.num_patches = (
-                (num_frames // tubelet_size)
-                * (img_size // patch_size) ** 2
-            )
-        else:
-            self.patch_embed = PatchEmbed(
-                patch_size=patch_size,
-                in_chans=in_chans,
-                embed_dim=embed_dim
-            )
-            self.num_patches = (
-                (img_size // patch_size) ** 2
-            )
-
-        # Position embedding
-        self.uniform_power = uniform_power
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, self.num_patches, embed_dim),
-            requires_grad=False
-        )
 
         # Attention Blocks
         self.blocks = nn.ModuleList([
@@ -92,37 +58,15 @@ class VisionTransformer(nn.Module):
             )
             for i in range(depth)])
         self.norm = norm_layer(embed_dim)
-
-        # --- initialize weights ---
         
     def forward(self, x, masks=None):
         """
         x: input image/video
         mask: indices of patch tokens to mask (remove)
         """
-        if masks is not None and not isinstance(masks, list):
-            masks = [masks]
-
-        # Tokenize input
-        pos_embed = self.pos_embed
-        x = self.patch_embed(x) # [B, num_patches, embed_dim]
-        if pos_embed is not None:
-            x += pos_embed
-        B, N, D = x.shape
-
-        # Mask away unwanted tokens
-        if masks is not None:
-            x = apply_masks(x, masks)
-            masks = torch.cat(masks, dim=0)
-
-        outs = []
         for i, blk in enumerate(self.blocks):
-            x = blk(x, mask=masks)
-            if self.out_layers is not None and i in self.out_layers:
-                outs.append(self.norm(x))
+            x = blk(x)
 
-        if self.out_layers is None:
-            return outs
         if self.norm is not None:
             x = self.norm(x)
 
