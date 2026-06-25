@@ -1,0 +1,291 @@
+import math
+from functools import partial
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from utils.patch_embed import PatchEmbed, PatchEmbed3D
+from utils.modules import Block
+from mask.utils import apply_masks, get_complement_masks
+
+class VisionTransformer(nn.Module):
+    def __init__(
+        self,
+        img_size=224,
+        patch_size=16,
+        num_frames=1,
+        tubelet_size=2,
+        embed_dim=768,
+        depth=12,
+        num_heads=12,
+        mlp_ratio=4.0,
+        qkv_bias=True,
+        qk_scale=None,
+        drop_rate=0.0,
+        attn_drop_rate=0.0,
+        norm_layer=nn.LayerNorm,
+        **kwargs
+    ):
+        super().__init__()
+        self.num_features = self.embed_dim = embed_dim
+        self.num_heads = num_heads
+
+        self.input_size = img_size
+        self.patch_size = patch_size
+        self.num_frames = num_frames
+        self.tubelet_size = tubelet_size
+        self.is_video = num_frames > 1
+
+        grid_size = self.input_size // self.patch_size
+        grid_depth = self.num_frames // self.tubelet_size
+
+        # Attention Blocks
+        self.blocks = nn.ModuleList([
+            Block(
+                dim=embed_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                qk_scale=qk_scale,
+                drop=drop_rate,
+                act_layer=nn.GELU,
+                grid_size=grid_size,
+                grid_depth=grid_depth,
+                attn_drop=attn_drop_rate,
+                norm_layer=norm_layer,
+            )
+            for i in range(depth)])
+        self.norm = norm_layer(embed_dim)
+        
+    def forward(self, x, masks=None):
+        for i, blk in enumerate(self.blocks):
+            x = blk(x)
+
+        if self.norm is not None:
+            x = self.norm(x)
+
+        return x
+    
+class VisionTransformerPredictor(nn.Module):
+    def __init__(
+            self,
+            img_size=224,
+            patch_size=16,
+            num_frames=1,
+            tubelet_size=2,
+            embed_dim=768,
+            predictor_embed_dim=384,
+            depth=6,
+            num_heads=12,
+            mlp_ratio=4.0,
+            qkv_bias=True,
+            qk_scale=None,
+            drop_rate=0.0,
+            attn_drop_rate=0.0,
+            norm_layer=nn.LayerNorm,
+            **kwargs
+            ):
+        super().__init__()
+        # map input to predictor dimension
+        self.predictor_embed = nn.Linear(embed_dim, predictor_embed_dim, bias=True)
+
+        self.input_size = img_size
+        self.patch_size = patch_size
+        self.num_frames = num_frames
+        self.tubelet_size = tubelet_size
+        self.is_video = num_frames > 1
+
+        grid_size = self.input_size // self.patch_size
+        grid_depth = self.num_frames // self.tubelet_size
+
+        # Attention Blocks
+        self.predictor_blocks = nn.ModuleList([
+            Block(
+                dim=predictor_embed_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                qk_scale=qk_scale,
+                drop=drop_rate,
+                act_layer=nn.GELU,
+                attn_drop=attn_drop_rate,
+                grid_size=grid_size,
+                grid_depth=grid_depth,
+                norm_layer=norm_layer)
+            for i in range(depth)])
+        
+        self.predictor_norm = norm_layer(predictor_embed_dim)
+        self.predictor_proj = nn.Linear(predictor_embed_dim, embed_dim, bias=True)
+
+    def forward(self, ctxt, tgt, masks_ctxt, masks_tgt):
+        assert (masks_ctxt is not None) and (masks_tgt is not None), 'Cannot run predictor without mask indices'
+        ctxt = self.predictor_embed(ctxt) 
+        tgt = self.predictor_embed(tgt) 
+        _, N_ctxt, D = ctxt.shape
+        x = torch.cat([ctxt, tgt], dim=1)
+
+        # Fwd prop
+        for blk in self.predictor_blocks:
+            x = blk(x)
+        x = self.predictor_norm(x)
+
+        # Return output corresponding to target tokens
+        x = x[:, N_ctxt:]
+        x = self.predictor_proj(x)
+
+        return x
+    
+class Model(nn.Module):
+    def __init__(self, num_patches=16, embed_dim=768, patch_size=16, in_chans=3, img_size=224, **kwargs):
+        super().__init__()
+        self.num_patches = num_patches
+        self.embed_dim = embed_dim
+        self.pos = nn.Parameter(
+            torch.zeros(1, self.num_patches, self.embed_dim),
+        )
+        self.vit = VisionTransformer()
+        self.predictor = VisionTransformerPredictor()
+
+    def forward(self, x, masks, train=False):
+        x = x + self.pos
+        B, N, C = x.shape
+        context = apply_masks(x, masks)
+        complement_mask = get_complement_masks(masks, N)
+        target = apply_masks(x, complement_mask)
+        ctxt = self.vit(context)
+        tgt = torch.zeros_like(x)
+        tgt = tgt + self.pos
+        tgt = apply_masks(tgt, complement_mask)
+        out = self.predictor(ctxt, tgt, masks, complement_mask)
+        loss = None
+        if train is True:
+            loss = F.mse_loss(out, target)
+
+        return out, loss
+    
+import torch
+from utils.patch_embed import PatchEmbed
+from prepare import create_dataloader, MaskedImageDataset, custom_collate_fn
+from torch.utils.data import DataLoader
+
+dataloader, dataset = create_dataloader(
+    image_dir="path/to/your/images",
+    batch_size=8,
+    patch_size=16,
+    img_size=224,  # Must be divisible by patch_size
+    mask_ratio=0.75,
+    num_workers=2,
+)
+
+# Iterate through dataloader
+for batch in dataloader:
+    pixel_values = batch["pixel_values"]      # [B, C, H, W]
+    patch_embeddings = batch["patch_embeddings"]  # [B, n_patches, embed_dim]
+    masked_indices = batch["masked_indices"]  # [B, n_masked]
+    visible_indices = batch["visible_indices"]  # [B, n_visible]
+    mask = batch["mask"]                      # [B, n_patches]
+    
+    print(f"Pixel values shape: {pixel_values.shape}")
+    print(f"Patch embeddings shape: {patch_embeddings.shape}")
+    print(f"Masked indices shape: {masked_indices.shape}")
+    print(f"Visible indices shape: {visible_indices.shape}")
+    print(f"Mask shape: {mask.shape}")
+    break
+
+train_dataset = MaskedImageDataset(
+    image_dir="F:\projects\jepa\train_data",
+    patch_size=16,
+    img_size=224,
+    mask_ratio=0.75,
+    use_augmentation=True,
+)
+
+val_dataset = MaskedImageDataset(
+    image_dir="F:\projects\jepa\val_data",
+    patch_size=16,
+    img_size=224,
+    mask_ratio=0.75,  # Doesn't matter much for validation
+)
+
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=32,
+    shuffle=True,
+    num_workers=4,
+    pin_memory=True,
+    collate_fn=custom_collate_fn,
+)
+
+val_loader = DataLoader(
+    val_dataset,
+    batch_size=32,
+    shuffle=False,
+    num_workers=4,
+    pin_memory=True,
+    collate_fn=custom_collate_fn,
+)
+
+print(f"Train batches: {len(train_loader)}")
+print(f"Val batches: {len(val_loader)}")
+
+def train_epoch(model, dataloader, optimizer, device):
+    model.train()
+    train_loss = 0
+    val_loss = 0
+
+    for batch in dataloader:
+        # Move to device
+        pixel_values = batch["pixel_values"].to(device)
+        patch_embeddings = batch["patch_embeddings"].to(device)
+        masked_indices = batch["masked_indices"].to(device)
+        visible_indices = batch["visible_indices"].to(device)
+        mask = batch["mask"].to(device)
+        
+        # Forward pass (example for MAE-like model)
+        out, loss = model(
+            pixel_values,
+            masked=masked_indices,
+            train=True
+        )
+        
+        # Backward
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        train_loss += loss.item()
+
+    model.eval()
+    with torch.no_grad():
+        for batch in val_loader:
+            pixel_values = batch["pixel_values"].to(device)
+            patch_embeddings = batch["patch_embeddings"].to(device)
+            masked_indices = batch["masked_indices"].to(device)
+            visible_indices = batch["visible_indices"].to(device)
+            mask = batch["mask"].to(device)
+
+            out, loss = model(
+                pixel_values,
+                masked=masked_indices,
+                train=True
+            )
+
+            val_loss += loss.item()
+
+    return train_loss / len(dataloader), val_loss / len(val_loader)
+
+# Training setup
+IMG_SIZE = 224
+PATCH_SIZE = 16
+n_patches_h = IMG_SIZE // PATCH_SIZE
+n_patches_w = IMG_SIZE // PATCH_SIZE
+total_patches = n_patches_h * n_patches_w
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = Model(num_patches=total_patches, embed_dim=768).to(device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=1.5e-4, weight_decay=0.05)
+
+for epoch in range(10):
+    train_loss, val_loss = train_epoch(model, train_loader, optimizer, device)
+    print(f"Epoch {epoch}: Train Loss = {train_loss:.4f}, Val Loss = {val_loss:.4f}")
