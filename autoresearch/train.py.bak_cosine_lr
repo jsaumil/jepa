@@ -269,7 +269,7 @@ total_patches = n_patches_h * n_patches_w
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 model = Model(num_patches=total_patches, embed_dim=192).to(device)
-optimizer = torch.optim.RAdam(model.parameters(), lr=3e-4, weight_decay=0.1)
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)
 
 # Cosine LR with warmup
 warmup_epochs = 3

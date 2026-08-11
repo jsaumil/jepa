@@ -1,0 +1,123 @@
+[
+  {
+    "experiment": "baseline",
+    "description": "ViT-B (768d, 12l, 12h), predictor (384d, 6l), batch=32, lr=1.5e-4, wd=0.05",
+    "train_loss": 0.506832,
+    "val_loss": 0.816174,
+    "training_seconds": 300.2,
+    "total_seconds": 300.2,
+    "epochs": 4
+  },
+  {
+    "experiment": "small_model",
+    "description": "Small ViT (192d, 4l, 6h), small predictor (192d, 2l, 6h), batch=32, lr=1.5e-4, wd=0.05",
+    "train_loss": 0.004368,
+    "val_loss": 0.248092,
+    "training_seconds": 304.7,
+    "epochs": 45
+  },
+  {
+    "experiment": "cosine_lr_warmup",
+    "description": "Small ViT (192d, 4l, 6h), cosine LR schedule + 3ep warmup, lr=3e-4, wd=0.1",
+    "train_loss": 0.013830,
+    "val_loss": 0.197500,
+    "training_seconds": 307.5,
+    "epochs": 38
+  },
+  {
+    "experiment": "exp10_high_dropout",
+    "description": "Same as cosine_lr_warmup but dropout/attn_dropout 0.1→0.3. Tested: stronger regularization via higher dropout to reduce overfitting.",
+    "train_loss": 0.028524,
+    "val_loss": 0.223354,
+    "training_seconds": 302.7,
+    "epochs": 35
+  },
+  {
+    "experiment": "exp11_high_weight_decay",
+    "description": "Same as cosine_lr_warmup but weight_decay 0.1→0.3. Tested: stronger L2 regularization to constrain weight magnitudes and reduce overfitting.",
+    "train_loss": 0.013525,
+    "val_loss": 0.203232,
+    "training_seconds": 307.2,
+    "epochs": 37
+  },
+  {
+    "experiment": "exp12_mixup",
+    "description": "Same as cosine_lr_warmup but added mixup augmentation (alpha=0.8) on patch embeddings. Blend pairs of samples and compute weighted loss from both original and permuted. 3 forward passes per step.",
+    "train_loss": 0.017688,
+    "val_loss": 0.248255,
+    "training_seconds": 314.6,
+    "epochs": 34
+  },
+  {
+    "experiment": "exp13_gaussian_noise",
+    "description": "Same as cosine_lr_warmup but added Gaussian noise (std=0.1) to patch embeddings during training. Acts as feature-level augmentation to prevent memorization.",
+    "train_loss": 0.016851,
+    "val_loss": 0.224391,
+    "training_seconds": 307.4,
+    "epochs": 36
+  },
+  {
+    "experiment": "exp14_lower_lr",
+    "description": "Same as cosine_lr_warmup but lr 3e-4→1e-4, eta_min 1e-5→1e-6. Tested: slower learning to prevent fitting training noise.",
+    "train_loss": 0.023195,
+    "val_loss": 0.256089,
+    "training_seconds": 301.9,
+    "epochs": 35
+  },
+  {
+    "experiment": "exp15_smaller_model",
+    "description": "Smaller ViT (128d, 3l, 4h), predictor (128d, 2l, 4h), cosine LR + warmup, lr=3e-4, wd=0.1. Tested: fewer params to reduce overfitting on small dataset.",
+    "train_loss": 0.013573,
+    "val_loss": 0.216635,
+    "training_seconds": 301.0,
+    "epochs": 42
+  },
+  {
+    "experiment": "exp16_combined_reg",
+    "description": "Same as cosine_lr_warmup but dropout/attn_dropout 0.1→0.3 AND weight_decay 0.1→0.3. Tested: combining two regularization methods for compounding effect.",
+    "train_loss": 0.029537,
+    "val_loss": 0.255771,
+    "training_seconds": 312.0,
+    "epochs": 34
+  },
+  {
+    "experiment": "exp17_cutmix",
+    "description": "Same as cosine_lr_warmup but added CutMix on patches — swap 30% of patches between random pairs in the batch during training. Forces model to use context.",
+    "train_loss": 0.014090,
+    "val_loss": 0.222584,
+    "training_seconds": 306.2,
+    "epochs": 36
+  },
+  {
+    "experiment": "exp18_grad_clip",
+    "description": "Same as cosine_lr_warmup but added gradient clipping (max_norm=1.0). Stabilizes training by capping gradient norms to prevent large updates.",
+    "train_loss": 0.012717,
+    "val_loss": 0.232901,
+    "training_seconds": 304.0,
+    "epochs": 36
+  },
+  {
+    "experiment": "exp19_ema",
+    "description": "Same as cosine_lr_warmup but added EMA (exponential moving average, decay=0.999) of model weights. Uses EMA weights for validation to smooth out training noise.",
+    "train_loss": 0.013445,
+    "val_loss": 0.351844,
+    "training_seconds": 305.4,
+    "epochs": 36
+  },
+  {
+    "experiment": "exp20_lower_mask_ratio",
+    "description": "Same as cosine_lr_warmup but mask_ratio 0.75→0.6. Tested: less aggressive masking gives model more visible patches, potentially easier task.",
+    "train_loss": 0.015035,
+    "val_loss": 0.232045,
+    "training_seconds": 307.0,
+    "epochs": 36
+  },
+  {
+    "experiment": "exp21_l1_loss",
+    "description": "Same as cosine_lr_warmup but MSE loss→L1 loss. L1 is more robust to outliers but may not converge as well for this task.",
+    "train_loss": 0.079423,
+    "val_loss": 0.362999,
+    "training_seconds": 302.0,
+    "epochs": 36
+  }
+]
