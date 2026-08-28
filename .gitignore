@@ -2,3 +2,7 @@
 .venv
 *.mp4
 *.zip
+/train_data
+*.jpg
+*.png
+/val_data

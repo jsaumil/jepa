@@ -12,7 +12,7 @@ def get_file_sizes():
     """Get a list of files and their sizes in the repository."""
     files = subprocess.run(["git", "ls-files", "-o", "-m","--exclude-standard"], capture_output=True, text=True).stdout.splitlines()
     file_sizes = [(f, os.path.getsize(f)) for f in files if os.path.exists(f)]
-    return file_sizes
+    return file_sizes,
 
 def stage_limited_files():
     """Stage only up to 1GB of files."""

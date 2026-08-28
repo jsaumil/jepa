@@ -8,7 +8,7 @@ from utils.patch_embed import PatchEmbed3D
 from info_nce import InfoNCE, info_nce
 
 class DeepFake(nn.Module):
-    def __init__(self, num_patches=16,embed_dim=768,vocab_size=50244, **kwargs):
+    def __init__(self, max_k=2000,embed_dim=768,vocab_size=50244, **kwargs):
         super().__init__()
 
         self.x_encoder = VisionTransformer()
@@ -19,11 +19,12 @@ class DeepFake(nn.Module):
             embedding_dim=embed_dim
         )
         
-        self.num_patches = num_patches
+        self.max_k = max_k
         self.embed_dim = embed_dim
         self.patcher = PatchEmbed3D()
+        # fix the positional embeddings
         self.pos = nn.Parameter(
-            torch.zeros(1,self.num_patches, self.embed_dim)
+            torch.zeros(1,self.max_k, self.embed_dim)
         )
         self.text_pos = nn.Parameter(
             torch.zeros(1, vocab_size, embed_dim)

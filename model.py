@@ -11,6 +11,7 @@ class Model(nn.Module):
         super().__init__()
         self.num_patches = num_patches
         self.embed_dim = embed_dim
+        self.patch = PatchEmbed(patch_size=patch_size, in_chan=in_chans, embed_dim=embed_dim)
         self.pos = nn.Parameter(
             torch.zeros(1, self.num_patches, self.embed_dim),
         )
@@ -18,6 +19,7 @@ class Model(nn.Module):
         self.predictor = VisionTransformerPredictor()
 
     def forward(self, x, masks, train=False):
+        x = self.patch(x)
         x = x + self.pos
         B, N, C = x.shape
         context = apply_masks(x, masks)
