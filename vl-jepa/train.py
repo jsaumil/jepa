@@ -36,12 +36,14 @@ def parse_args():
 
     # training
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--grad_accum", type=int, default=4)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight_decay", type=float, default=0.05)
     parser.add_argument("--warmup_epochs", type=int, default=5)
     parser.add_argument("--grad_clip", type=float, default=1.0)
-    parser.add_argument("--amp", action="store_true", default=False)
+    parser.add_argument("--amp", action="store_true", default=True)
+    parser.add_argument("--small_model", action="store_true", default=False)
 
     # data params
     parser.add_argument("--img_size", type=int, default=224)
@@ -93,6 +95,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, arg
     model.train()
     total_loss = 0.0
     n_batches = 0
+    optimizer.zero_grad()
 
     for i, batch in enumerate(dataloader):
         x = batch["x"].to(device)
@@ -102,21 +105,26 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, arg
         if args.amp:
             with autocast():
                 _, loss = model(x, query, y, train=True)
+                loss = loss / args.grad_accum
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
         else:
             _, loss = model(x, query, y, train=True)
+            loss = loss / args.grad_accum
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            optimizer.step()
 
-        optimizer.zero_grad()
-        scheduler.step()
+        if (i + 1) % args.grad_accum == 0 or (i + 1) == len(dataloader):
+            if args.amp:
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                optimizer.step()
+            optimizer.zero_grad()
+            scheduler.step()
 
-        total_loss += loss.item()
+        total_loss += loss.item() * args.grad_accum
         n_batches += 1
 
     return total_loss / max(n_batches, 1)
@@ -232,10 +240,16 @@ def main():
     print(f"Train batches: {len(train_loader)} | Val batches: {len(val_loader)}")
 
     # -- model --
-    model = DeepFake(
-        embed_dim=args.embed_dim,
-        vocab_size=args.vocab_size,
-    ).to(device)
+    if args.small_model:
+        model = DeepFake(
+            embed_dim=256,
+            vocab_size=args.vocab_size,
+        ).to(device)
+    else:
+        model = DeepFake(
+            embed_dim=args.embed_dim,
+            vocab_size=args.vocab_size,
+        ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"Model params: {n_params:.2f}M")
