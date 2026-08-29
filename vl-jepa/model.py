@@ -11,9 +11,9 @@ class DeepFake(nn.Module):
     def __init__(self, max_k=2000,embed_dim=768,vocab_size=50244, **kwargs):
         super().__init__()
 
-        self.x_encoder = VisionTransformer()
-        self.y_encoder = Transformer()
-        self.predictor = Predictor()
+        self.x_encoder = VisionTransformer(embed_dim=embed_dim)
+        self.y_encoder = Transformer(embed_dim=embed_dim)
+        self.predictor = Predictor(embed_dim=embed_dim)
         self.embed = nn.Embedding(
             num_embeddings=vocab_size,
             embedding_dim=embed_dim
@@ -21,7 +21,7 @@ class DeepFake(nn.Module):
         
         self.max_k = max_k
         self.embed_dim = embed_dim
-        self.patcher = PatchEmbed3D()
+        self.patcher = PatchEmbed3D(embed_dim=embed_dim)
         # fix the positional embeddings
         self.pos = nn.Parameter(
             torch.zeros(1,self.max_k, self.embed_dim)
