@@ -8,12 +8,12 @@ from utils.patch_embed import PatchEmbed3D
 from info_nce import InfoNCE, info_nce
 
 class DeepFake(nn.Module):
-    def __init__(self, max_k=2000,embed_dim=768,vocab_size=50244, **kwargs):
+    def __init__(self, max_k=2000,embed_dim=768,vocab_size=50244, depth=12, num_heads=12, pred_depth=6, pred_heads=12, **kwargs):
         super().__init__()
 
-        self.x_encoder = VisionTransformer(embed_dim=embed_dim)
-        self.y_encoder = Transformer(embed_dim=embed_dim)
-        self.predictor = Predictor(embed_dim=embed_dim)
+        self.x_encoder = VisionTransformer(embed_dim=embed_dim, depth=depth, num_heads=num_heads)
+        self.y_encoder = Transformer(embed_dim=embed_dim, depth=depth, num_heads=num_heads)
+        self.predictor = Predictor(embed_dim=embed_dim, depth=pred_depth, num_heads=pred_heads)
         self.embed = nn.Embedding(
             num_embeddings=vocab_size,
             embedding_dim=embed_dim

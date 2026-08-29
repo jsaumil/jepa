@@ -243,6 +243,10 @@ def main():
     if args.small_model:
         model = DeepFake(
             embed_dim=256,
+            depth=4,
+            num_heads=8,
+            pred_depth=2,
+            pred_heads=8,
             vocab_size=args.vocab_size,
         ).to(device)
     else:
