@@ -7,6 +7,7 @@ import tiktoken
 import numpy as np
 import torchvision.transforms as T
 from torch.utils.data import Dataset, DataLoader
+from PIL import Image
 from pathlib import Path
 from typing import Dict, List, Tuple
 
