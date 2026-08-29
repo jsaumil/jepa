@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from utils.modules import CrossAttention
+from utils.modules import CrossAttentionBlock
 
 class Predictor(nn.Module):
     def __init__(self,embed_dim = 768,depth=6,num_heads=12,mlp_ratio=4.0):
@@ -15,7 +15,7 @@ class Predictor(nn.Module):
         self.predictor_embed = nn.Linear(embed_dim,embed_dim,bias=True)
 
         self.predictor = nn.ModuleList([
-            CrossAttention(
+            CrossAttentionBlock(
                 dim = self.embed_dim,
                 num_heads=self.num_heads,
                 mlp_ratio=self.mlp_ratio,
