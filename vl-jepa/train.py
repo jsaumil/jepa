@@ -9,7 +9,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, Subset
 
 _project_root = str(Path(__file__).resolve().parent.parent)
@@ -103,7 +103,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, arg
         y = batch["y"].to(device)
 
         if args.amp:
-            with autocast():
+            with autocast("cuda"):
                 _, loss = model(x, query, y, train=True)
                 loss = loss / args.grad_accum
             scaler.scale(loss).backward()

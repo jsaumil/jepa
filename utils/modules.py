@@ -103,7 +103,7 @@ class CrossAttention(nn.Module):
         k, v = kv[0], kv[1] #(B, num_heads, seq_len, feature_dim_per_head)
 
         if self.use_sdpa:
-            with torch.backends.cuda.sdpa_kernel():
+            with torch.backends.cuda.sdp_kernel():
                 q = F.scaled_dot_product_attention(q, k, v)
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale
