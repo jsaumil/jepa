@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import math
+import random
 import argparse
 from pathlib import Path
 
@@ -9,13 +10,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.cuda.amp import GradScaler, autocast
+from torch.utils.data import DataLoader, Subset
 
 _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from model import DeepFake
-from prepare import create_dataloader, QUERY
+from prepare import DeepFakeDataset, collate_fn, QUERY
 
 
 def parse_args():
@@ -26,6 +28,7 @@ def parse_args():
     parser.add_argument("--train_csv", type=str, required=True)
     parser.add_argument("--val_images", type=str, default=None)
     parser.add_argument("--val_csv", type=str, default=None)
+    parser.add_argument("--val_split", type=float, default=0.2)
 
     # model
     parser.add_argument("--embed_dim", type=int, default=768)
@@ -148,31 +151,85 @@ def main():
     print(f"Query: \"{QUERY}\"")
 
     # -- data --
-    train_loader, train_dataset = create_dataloader(
-        images_dir=args.train_images,
-        csv_dir=args.train_csv,
-        batch_size=args.batch_size,
-        img_size=args.img_size,
-        max_frames=args.max_frames,
-        num_workers=args.num_workers,
-        shuffle=True,
-        is_train=True,
-    )
-    print(f"Train batches: {len(train_loader)}")
+    use_split = not (args.val_images and args.val_csv)
 
-    val_loader = None
-    if args.val_images and args.val_csv:
-        val_loader, _ = create_dataloader(
-            images_dir=args.val_images,
-            csv_dir=args.val_csv,
-            batch_size=args.batch_size,
+    if use_split:
+        full_dataset = DeepFakeDataset(
+            images_dir=args.train_images,
+            csv_dir=args.train_csv,
             img_size=args.img_size,
             max_frames=args.max_frames,
+            is_train=True,
+        )
+        n = len(full_dataset)
+        n_val = int(n * args.val_split)
+        n_train = n - n_val
+
+        indices = list(range(n))
+        random.seed(42)
+        random.shuffle(indices)
+        train_indices = indices[:n_train]
+        val_indices = indices[n_train:]
+
+        train_dataset = Subset(full_dataset, train_indices)
+        val_dataset = Subset(full_dataset, val_indices)
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
             num_workers=args.num_workers,
+            pin_memory=True,
+            drop_last=True,
+            collate_fn=collate_fn,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
             shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            drop_last=False,
+            collate_fn=collate_fn,
+        )
+        print(f"Train: {n_train} samples | Val: {n_val} samples (split={args.val_split})")
+    else:
+        full_dataset = DeepFakeDataset(
+            images_dir=args.train_images,
+            csv_dir=args.train_csv,
+            img_size=args.img_size,
+            max_frames=args.max_frames,
+            is_train=True,
+        )
+        train_loader = DataLoader(
+            full_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            drop_last=True,
+            collate_fn=collate_fn,
+        )
+
+        val_dataset = DeepFakeDataset(
+            images_dir=args.val_images,
+            csv_dir=args.val_csv,
+            img_size=args.img_size,
+            max_frames=args.max_frames,
             is_train=False,
         )
-        print(f"Val batches: {len(val_loader)}")
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            drop_last=False,
+            collate_fn=collate_fn,
+        )
+        print(f"Train: {len(full_dataset)} samples | Val: {len(val_dataset)} samples (separate)")
+
+    print(f"Train batches: {len(train_loader)} | Val batches: {len(val_loader)}")
 
     # -- model --
     model = DeepFake(
@@ -217,17 +274,13 @@ def main():
 
         train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, scaler, device, args)
 
-        val_loss = None
-        if val_loader:
-            val_loss = evaluate(model, val_loader, device)
+        val_loss = evaluate(model, val_loader, device)
 
         elapsed = time.time() - t0
         lr_now = optimizer.param_groups[0]["lr"]
 
         if epoch % args.print_every == 0:
-            msg = f"Epoch {epoch+1}/{args.epochs} | train_loss: {train_loss:.4f} | lr: {lr_now:.2e} | {elapsed:.1f}s"
-            if val_loss is not None:
-                msg += f" | val_loss: {val_loss:.4f}"
+            msg = f"Epoch {epoch+1}/{args.epochs} | train_loss: {train_loss:.4f} | val_loss: {val_loss:.4f} | lr: {lr_now:.2e} | {elapsed:.1f}s"
             print(msg)
 
         # -- checkpoint --
@@ -235,7 +288,7 @@ def main():
             ckpt_path = os.path.join(args.save_dir, f"epoch_{epoch+1}.pt")
             save_checkpoint(model, optimizer, scheduler, scaler, epoch, train_loss, ckpt_path)
 
-        if val_loss is not None and val_loss < best_val_loss:
+        if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_path = os.path.join(args.save_dir, "best.pt")
             save_checkpoint(model, optimizer, scheduler, scaler, epoch, val_loss, best_path)

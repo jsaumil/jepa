@@ -60,36 +60,38 @@ class DeepFakeDataset(Dataset):
             with open(csv_file, "r", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    video_name = row.get("video_name") or row.get("filename") or row.get("name")
-                    label = row.get("label") or row.get("class") or row.get("is_fake")
+                    file_path = row.get("File Path") or row.get("file_path") or row.get("filename")
+                    label = row.get("Label") or row.get("label") or row.get("class")
 
-                    if video_name is None or label is None:
+                    if file_path is None or label is None:
                         continue
 
-                    video_name = video_name.strip()
-                    label = label.strip().lower()
+                    file_path = file_path.strip()
+                    label = label.strip().upper()
+
+                    video_stem = Path(file_path).stem
 
                     frame_paths = []
 
-                    folder_candidate = self.images_dir / video_name
+                    folder_candidate = self.images_dir / video_stem
                     if folder_candidate.is_dir():
                         for ext in valid_ext:
                             frame_paths.extend(sorted(folder_candidate.glob(f"*{ext}")))
                             frame_paths.extend(sorted(folder_candidate.glob(f"*{ext.upper()}")))
                     else:
                         for ext in valid_ext:
-                            candidate = self.images_dir / f"{video_name}{ext}"
+                            candidate = self.images_dir / f"{video_stem}{ext}"
                             if candidate.exists():
                                 frame_paths.append(candidate)
                                 break
 
                         if not frame_paths:
                             for ext in valid_ext:
-                                matches = sorted(self.images_dir.glob(f"{video_name}*{ext}"))
+                                matches = sorted(self.images_dir.glob(f"{video_stem}*{ext}"))
                                 frame_paths.extend(matches)
 
                     if not frame_paths:
-                        print(f"Warning: no frames found for '{video_name}', skipping")
+                        print(f"Warning: no frames found for '{video_stem}', skipping")
                         continue
 
                     samples.append({
@@ -119,7 +121,8 @@ class DeepFakeDataset(Dataset):
         return self.transform(img)
 
     def _tokenize_label(self, label: str) -> torch.Tensor:
-        if label in ("fake", "1", "true", "yes", "1.0"):
+        label_upper = label.upper()
+        if label_upper in ("FAKE", "1", "TRUE", "YES", "1.0"):
             text = "fake"
         else:
             text = "not fake"
