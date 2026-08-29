@@ -24,9 +24,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train VL-JEPA DeepFake model")
 
     # data
-    parser.add_argument("--train_images", type=str, required=True)
+    parser.add_argument("--train_videos", type=str, required=True)
     parser.add_argument("--train_csv", type=str, required=True)
-    parser.add_argument("--val_images", type=str, default=None)
+    parser.add_argument("--val_videos", type=str, default=None)
     parser.add_argument("--val_csv", type=str, default=None)
     parser.add_argument("--val_split", type=float, default=0.2)
 
@@ -151,11 +151,11 @@ def main():
     print(f"Query: \"{QUERY}\"")
 
     # -- data --
-    use_split = not (args.val_images and args.val_csv)
+    use_split = not (args.val_videos and args.val_csv)
 
     if use_split:
         full_dataset = DeepFakeDataset(
-            images_dir=args.train_images,
+            videos_dir=args.train_videos,
             csv_dir=args.train_csv,
             img_size=args.img_size,
             max_frames=args.max_frames,
@@ -195,7 +195,7 @@ def main():
         print(f"Train: {n_train} samples | Val: {n_val} samples (split={args.val_split})")
     else:
         full_dataset = DeepFakeDataset(
-            images_dir=args.train_images,
+            videos_dir=args.train_videos,
             csv_dir=args.train_csv,
             img_size=args.img_size,
             max_frames=args.max_frames,
@@ -212,7 +212,7 @@ def main():
         )
 
         val_dataset = DeepFakeDataset(
-            images_dir=args.val_images,
+            videos_dir=args.val_videos,
             csv_dir=args.val_csv,
             img_size=args.img_size,
             max_frames=args.max_frames,

@@ -1,12 +1,12 @@
 import os
 import csv
-import glob
 import torch
 import random
+import cv2
 import tiktoken
+import numpy as np
 import torchvision.transforms as T
 from torch.utils.data import Dataset, DataLoader
-from PIL import Image
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -19,7 +19,7 @@ MAX_FRAMES = 16
 class DeepFakeDataset(Dataset):
     def __init__(
         self,
-        images_dir: str,
+        videos_dir: str,
         csv_dir: str,
         img_size: int = IMG_SIZE,
         max_frames: int = MAX_FRAMES,
@@ -27,7 +27,7 @@ class DeepFakeDataset(Dataset):
         max_label_len: int = 8,
         is_train: bool = True,
     ):
-        self.images_dir = Path(images_dir)
+        self.videos_dir = Path(videos_dir)
         self.csv_dir = Path(csv_dir)
         self.img_size = img_size
         self.max_frames = max_frames
@@ -54,7 +54,7 @@ class DeepFakeDataset(Dataset):
 
     def _load_csv_data(self) -> List[Dict]:
         samples = []
-        valid_ext = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"}
+        video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 
         for csv_file in sorted(self.csv_dir.glob("*.csv")):
             with open(csv_file, "r", encoding="utf-8") as f:
@@ -70,55 +70,69 @@ class DeepFakeDataset(Dataset):
                     label = label.strip().upper()
 
                     video_stem = Path(file_path).stem
+                    csv_subdir = Path(file_path).parent
 
-                    frame_paths = []
+                    video_path = None
 
-                    folder_candidate = self.images_dir / video_stem
-                    if folder_candidate.is_dir():
-                        for ext in valid_ext:
-                            frame_paths.extend(sorted(folder_candidate.glob(f"*{ext}")))
-                            frame_paths.extend(sorted(folder_candidate.glob(f"*{ext.upper()}")))
+                    candidate = self.videos_dir / csv_subdir / f"{video_stem}.mp4"
+                    if candidate.exists():
+                        video_path = candidate
                     else:
-                        for ext in valid_ext:
-                            candidate = self.images_dir / f"{video_stem}{ext}"
+                        for ext in video_exts:
+                            candidate = self.videos_dir / f"{video_stem}{ext}"
                             if candidate.exists():
-                                frame_paths.append(candidate)
+                                video_path = candidate
                                 break
 
-                        if not frame_paths:
-                            for ext in valid_ext:
-                                matches = sorted(self.images_dir.glob(f"{video_stem}*{ext}"))
-                                frame_paths.extend(matches)
+                    if video_path is None:
+                        for ext in video_exts:
+                            matches = list(self.videos_dir.glob(f"**/{video_stem}{ext}"))
+                            if matches:
+                                video_path = matches[0]
+                                break
 
-                    if not frame_paths:
-                        print(f"Warning: no frames found for '{video_stem}', skipping")
+                    if video_path is None:
+                        print(f"Warning: no video found for '{video_stem}', skipping")
                         continue
 
                     samples.append({
-                        "frame_paths": [str(p) for p in frame_paths],
+                        "video_path": str(video_path),
                         "label": label,
                     })
 
         return samples
 
-    def _sample_frames(self, frame_paths: List[str]) -> List[str]:
-        n = len(frame_paths)
-        if n == 0:
+    def _read_video_frames(self, video_path: str) -> List[torch.Tensor]:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print(f"Warning: cannot open '{video_path}'")
             return []
-        if n <= self.max_frames:
-            return frame_paths
 
-        if self.is_train:
-            indices = sorted(random.sample(range(n), self.max_frames))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            cap.release()
+            return []
+
+        if total_frames <= self.max_frames:
+            indices = list(range(total_frames))
+        elif self.is_train:
+            indices = sorted(random.sample(range(total_frames), self.max_frames))
         else:
-            step = n / self.max_frames
+            step = total_frames / self.max_frames
             indices = [int(i * step) for i in range(self.max_frames)]
 
-        return [frame_paths[i] for i in indices]
+        frames = []
+        for idx in indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if ret:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame = Image.fromarray(frame)
+                frame = self.transform(frame)
+                frames.append(frame)
 
-    def _load_and_resize(self, path: str) -> torch.Tensor:
-        img = Image.open(path).convert("RGB")
-        return self.transform(img)
+        cap.release()
+        return frames
 
     def _tokenize_label(self, label: str) -> torch.Tensor:
         label_upper = label.upper()
@@ -135,8 +149,10 @@ class DeepFakeDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.samples[idx]
 
-        selected = self._sample_frames(sample["frame_paths"])
-        frames = [self._load_and_resize(p) for p in selected]
+        frames = self._read_video_frames(sample["video_path"])
+        if not frames:
+            frames = [torch.zeros(3, self.img_size, self.img_size)]
+
         x = torch.stack(frames, dim=1)  # [C, T, H, W]
 
         query = self.query_tokens.clone()
@@ -161,7 +177,7 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
     for item in batch:
         q = item["query"]
         y = item["y"]
-        x = item["x"]  # [C, T_i, H, W]
+        x = item["x"]
 
         q_padded = torch.zeros(max_q, dtype=torch.long)
         q_padded[: q.shape[0]] = q
@@ -179,14 +195,14 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         images.append(x)
 
     return {
-        "x": torch.stack(images),        # [B, C, max_T, H, W]
+        "x": torch.stack(images),
         "query": torch.stack(queries),
         "y": torch.stack(labels),
     }
 
 
 def create_dataloader(
-    images_dir: str,
+    videos_dir: str,
     csv_dir: str,
     batch_size: int = 16,
     img_size: int = IMG_SIZE,
@@ -199,7 +215,7 @@ def create_dataloader(
     is_train: bool = True,
 ) -> Tuple[DataLoader, DeepFakeDataset]:
     dataset = DeepFakeDataset(
-        images_dir=images_dir,
+        videos_dir=videos_dir,
         csv_dir=csv_dir,
         img_size=img_size,
         max_frames=max_frames,
@@ -225,7 +241,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Prepare DeepFake dataset")
-    parser.add_argument("--images_dir", type=str, required=True, help="Path to images/videos folder")
+    parser.add_argument("--videos_dir", type=str, required=True, help="Path to videos folder")
     parser.add_argument("--csv_dir", type=str, required=True, help="Path to CSV folder")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--img_size", type=int, default=IMG_SIZE)
@@ -234,7 +250,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     dataloader, dataset = create_dataloader(
-        images_dir=args.images_dir,
+        videos_dir=args.videos_dir,
         csv_dir=args.csv_dir,
         batch_size=args.batch_size,
         img_size=args.img_size,
