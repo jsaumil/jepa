@@ -23,7 +23,7 @@ class Predictor(nn.Module):
             for i in range(self.depth)
         ])
 
-        self.norm = nn.LayerNorm()
+        self.norm = nn.LayerNorm(self.embed_dim)
         self.pred_proj = nn.Linear(embed_dim,embed_dim,bias=True)
 
     def forward(self,embed_vit, q):
