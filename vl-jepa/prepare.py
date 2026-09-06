@@ -9,7 +9,7 @@ import torchvision.transforms as T
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 QUERY = "it is fake or not?"
@@ -53,47 +53,71 @@ class DeepFakeDataset(Dataset):
         self.samples = self._load_csv_data()
         print(f"Loaded {len(self.samples)} samples from {csv_dir}")
 
+    def _resolve_video_path(
+        self, csv_stem: str, file_path: str
+    ) -> Optional[Path]:
+        video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+        rel = Path(file_path.strip())
+        video_stem = rel.stem
+        rel_parts = rel.parts[:-1]
+
+        candidate_subdirs: List[Path] = []
+        if rel_parts:
+            candidate_subdirs.append(self.videos_dir / Path(*rel_parts))
+        candidate_subdirs.append(self.videos_dir / csv_stem)
+
+        candidate_subdirs.extend([
+            self.videos_dir / "original" / csv_stem,
+            self.videos_dir / "Original" / csv_stem,
+            self.videos_dir / "original" / Path(*rel_parts) if rel_parts else self.videos_dir / "original",
+            self.videos_dir,
+        ])
+
+        seen = set()
+        for subdir in candidate_subdirs:
+            key = str(subdir)
+            if key in seen:
+                continue
+            seen.add(key)
+            for ext in video_exts:
+                candidate = subdir / f"{video_stem}{ext}"
+                if candidate.exists():
+                    return candidate
+
+        for ext in video_exts:
+            matches = list(self.videos_dir.glob(f"**/{video_stem}{ext}"))
+            if matches:
+                matches.sort()
+                return matches[0]
+
+        return None
+
     def _load_csv_data(self) -> List[Dict]:
         samples = []
-        video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 
         for csv_file in sorted(self.csv_dir.glob("*.csv")):
+            csv_stem = csv_file.stem
             with open(csv_file, "r", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    file_path = row.get("File Path") or row.get("file_path") or row.get("filename")
+                    file_path = (
+                        row.get("File Path")
+                        or row.get("file_path")
+                        or row.get("filename")
+                    )
                     label = row.get("Label") or row.get("label") or row.get("class")
 
                     if file_path is None or label is None:
                         continue
 
-                    file_path = file_path.strip()
                     label = label.strip().upper()
 
-                    video_stem = Path(file_path).stem
-                    csv_subdir = Path(file_path).parent
-
-                    video_path = None
-
-                    candidate = self.videos_dir / csv_subdir / f"{video_stem}.mp4"
-                    if candidate.exists():
-                        video_path = candidate
-                    else:
-                        for ext in video_exts:
-                            candidate = self.videos_dir / f"{video_stem}{ext}"
-                            if candidate.exists():
-                                video_path = candidate
-                                break
-
+                    video_path = self._resolve_video_path(csv_stem, file_path)
                     if video_path is None:
-                        for ext in video_exts:
-                            matches = list(self.videos_dir.glob(f"**/{video_stem}{ext}"))
-                            if matches:
-                                video_path = matches[0]
-                                break
-
-                    if video_path is None:
-                        print(f"Warning: no video found for '{video_stem}', skipping")
+                        print(
+                            f"Warning: no video found for '{file_path}' "
+                            f"(csv '{csv_file.name}'), skipping"
+                        )
                         continue
 
                     samples.append({
@@ -136,9 +160,11 @@ class DeepFakeDataset(Dataset):
         return frames
 
     def _tokenize_label(self, label: str) -> torch.Tensor:
-        label_upper = label.upper()
-        if label_upper in ("FAKE", "1", "TRUE", "YES", "1.0"):
+        label_norm = label.strip().upper()
+        if label_norm in ("FAKE", "1", "TRUE", "YES", "1.0", "T"):
             text = "fake"
+        elif label_norm in ("REAL", "0", "FALSE", "NO", "0.0", "F", "ORIGINAL", "PRISTINE"):
+            text = "not fake"
         else:
             text = "not fake"
         tokens = self.enc.encode(text)
