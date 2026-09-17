@@ -5,7 +5,6 @@ from x_encoder import VisionTransformer
 from y_encoder import Transformer
 from predictor import Predictor
 from utils.patch_embed import PatchEmbed3D
-from info_nce import InfoNCE, info_nce
 
 class DeepFake(nn.Module):
     def __init__(self, max_k=2000,embed_dim=768,vocab_size=50244, depth=12, num_heads=12, pred_depth=6, pred_heads=12, **kwargs):
@@ -27,15 +26,15 @@ class DeepFake(nn.Module):
             torch.zeros(1,self.max_k, self.embed_dim)
         )
         self.text_pos = nn.Parameter(
-            torch.zeros(1, vocab_size, embed_dim)
+            torch.zeros(1, self.max_k, embed_dim)
         )
-        self.loss_fun = InfoNCE()
 
     def forward(self, x, query, y, train=False):
         x = self.patcher(x)
         B, N, C = x.shape
         x = x + self.pos[:, :N, :]
         x = self.x_encoder(x)
+
         q = self.embed(query)
         Bq, Q, Cq = q.shape
         q = q + self.text_pos[:, :Q, :]
@@ -46,6 +45,16 @@ class DeepFake(nn.Module):
             By, Y, Cy = y.shape
             y = y + self.pos[:, :Y, :]
             y = self.y_encoder(y)
-            loss = F.mse_loss(y_pred,y)
 
-        return y_pred, loss
+            y_pred = y_pred.mean(dim=1) # [B, C]
+            y = y.mean(dim=1) # [B, C]
+
+            logits = y_pred @ y.transpose(-1,-2)
+            labels = torch.arange(logits.shape[0], device=logits.device)
+            loss_i2t = F.cross_entropy(logits, labels)
+            loss_t2i = F.cross_entropy(logits.t(), labels)
+            loss = (loss_i2t + loss_t2i) / 2
+
+            return y_pred, loss
+
+        return y_pred

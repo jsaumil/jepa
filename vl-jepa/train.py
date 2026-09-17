@@ -2,6 +2,8 @@ import os
 import sys
 import time
 import math
+import json
+import csv
 import random
 import argparse
 from pathlib import Path
@@ -43,6 +45,7 @@ def parse_args():
     parser.add_argument("--warmup_epochs", type=int, default=5)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--amp", action="store_true", default=True)
+    parser.add_argument("--no_amp", action="store_false", dest="amp")
     parser.add_argument("--small_model", action="store_true", default=False)
 
     # data params
@@ -71,10 +74,64 @@ def get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps):
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, device, max_batches=None):
+def get_label_prototypes(model, device, dataset, max_batches=8):
+    model.eval()
+
+    fake_embs = []
+    real_embs = []
+    loader = DataLoader(
+        dataset, batch_size=8, shuffle=True, num_workers=0,
+        collate_fn=collate_fn,
+    )
+    for i, batch in enumerate(loader):
+        if i >= max_batches:
+            break
+        x = batch["x"].to(device)
+        y = batch["y"].to(device)
+        labels = batch["label"]
+        y_emb = model.embed(y) + model.pos[:, :y.shape[1], :]
+        y_out = model.y_encoder(y_emb)
+        for j in range(y_out.shape[0]):
+            y_out_j = y_out[j, : batch["y_length"][j].item()]
+            if labels[j].item() == 1:
+                fake_embs.append(y_out_j.mean(0))
+            else:
+                real_embs.append(y_out_j.mean(0))
+
+    if not fake_embs or not real_embs:
+        return None, None
+
+    fake_proto = torch.stack(fake_embs, 0).mean(0)
+    real_proto = torch.stack(real_embs, 0).mean(0)
+    fake_proto = F.normalize(fake_proto, dim=0)
+    real_proto = F.normalize(real_proto, dim=0)
+    return fake_proto, real_proto
+
+
+@torch.no_grad()
+def predict_labels(model, y_pred, dataset, device):
+    fake_proto, real_proto = get_label_prototypes(
+        model, device, dataset, max_batches=4
+    )
+    if fake_proto is None:
+        return None
+
+    y_pred_pooled = y_pred.mean(dim=1)
+    y_pred_norm = F.normalize(y_pred_pooled, dim=-1)
+
+    sim_fake = y_pred_norm @ fake_proto
+    sim_real = y_pred_norm @ real_proto
+    preds = (sim_fake > sim_real).long().cpu()
+    return preds
+
+
+@torch.no_grad()
+def evaluate(model, dataloader, device, dataset, max_batches=None):
     model.eval()
     total_loss = 0.0
     n_batches = 0
+    all_preds = []
+    all_labels = []
 
     for i, batch in enumerate(dataloader):
         if max_batches and i >= max_batches:
@@ -84,11 +141,38 @@ def evaluate(model, dataloader, device, max_batches=None):
         query = batch["query"].to(device)
         y = batch["y"].to(device)
 
-        _, loss = model(x, query, y, train=True)
+        y_pred, loss = model(x, query, y, train=True)
         total_loss += loss.item()
         n_batches += 1
 
-    return total_loss / max(n_batches, 1)
+        preds = predict_labels(model, y_pred, dataset, device)
+        if preds is not None:
+            labels = batch["label"].long()
+            all_preds.append(preds)
+            all_labels.append(labels)
+
+    avg_loss = total_loss / max(n_batches, 1)
+    metrics = {"loss": avg_loss, "accuracy": 0.0, "precision": 0.0,
+               "recall": 0.0, "f1": 0.0, "n_samples": 0}
+
+    if all_preds:
+        preds = torch.cat(all_preds)
+        labels = torch.cat(all_labels)
+        tp = ((preds == 1) & (labels == 1)).sum().item()
+        fp = ((preds == 1) & (labels == 0)).sum().item()
+        fn = ((preds == 0) & (labels == 1)).sum().item()
+        tn = ((preds == 0) & (labels == 0)).sum().item()
+        n = tp + fp + fn + tn
+        acc = (tp + tn) / max(n, 1)
+        prec = tp / max(tp + fp, 1)
+        rec = tp / max(tp + fn, 1)
+        f1 = 2 * prec * rec / max(prec + rec, 1e-8)
+        metrics.update({
+            "accuracy": acc, "precision": prec, "recall": rec, "f1": f1,
+            "n_samples": n, "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+        })
+
+    return metrics
 
 
 def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, args):
@@ -103,7 +187,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, arg
         y = batch["y"].to(device)
 
         if args.amp:
-            with autocast("cuda"):
+            with autocast(device_type="cuda"):
                 _, loss = model(x, query, y, train=True)
                 loss = loss / args.grad_accum
             scaler.scale(loss).backward()
@@ -188,7 +272,7 @@ def main():
             shuffle=True,
             num_workers=args.num_workers,
             pin_memory=True,
-            drop_last=True,
+            drop_last=False,
             collate_fn=collate_fn,
         )
         val_loader = DataLoader(
@@ -215,7 +299,7 @@ def main():
             shuffle=True,
             num_workers=args.num_workers,
             pin_memory=True,
-            drop_last=True,
+            drop_last=False,
             collate_fn=collate_fn,
         )
 
@@ -266,15 +350,22 @@ def main():
         betas=(0.9, 0.999),
     )
 
-    total_steps = len(train_loader) * args.epochs
-    warmup_steps = len(train_loader) * args.warmup_epochs
+    if len(train_loader) == 0:
+        raise ValueError(
+            "No training batches were created. Reduce --batch_size or provide more data."
+        )
+    updates_per_epoch = math.ceil(len(train_loader) / max(args.grad_accum, 1))
+    total_steps = updates_per_epoch * args.epochs
+    warmup_steps = updates_per_epoch * args.warmup_epochs
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
 
-    scaler = GradScaler() if args.amp else None
+    args.amp = args.amp and device.type == "cuda"
+    scaler = GradScaler("cuda", enabled=True) if args.amp else None
 
     # -- resume --
     start_epoch = 0
     best_val_loss = float("inf")
+    best_val_f1 = -1.0
     if args.resume and os.path.exists(args.resume):
         start_epoch, _ = load_checkpoint(args.resume, model, optimizer, scheduler, scaler)
         start_epoch += 1
@@ -283,6 +374,31 @@ def main():
     # -- save dir --
     os.makedirs(args.save_dir, exist_ok=True)
 
+    metrics_path_json = os.path.join(args.save_dir, "metrics.json")
+    metrics_path_csv = os.path.join(args.save_dir, "metrics.csv")
+    history = []
+    if args.resume and os.path.exists(metrics_path_json):
+        try:
+            with open(metrics_path_json, "r", encoding="utf-8") as f:
+                history = json.load(f)
+        except Exception:
+            history = []
+
+    if history:
+        best_val_loss = min(row.get("val_loss", float("inf")) for row in history)
+        best_val_f1 = max(row.get("val_f1", -1.0) for row in history)
+
+    def save_metrics():
+        with open(metrics_path_json, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+        if history:
+            keys = list(history[0].keys())
+            with open(metrics_path_csv, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=keys)
+                w.writeheader()
+                for row in history:
+                    w.writerow(row)
+
     # -- training loop --
     print(f"\nStarting training for {args.epochs} epochs")
     print("-" * 60)
@@ -290,26 +406,66 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
 
-        train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, scaler, device, args)
+        train_loss = train_one_epoch(
+            model, train_loader, optimizer, scheduler, scaler, device, args
+        )
 
-        val_loss = evaluate(model, val_loader, device)
+        val_metrics = evaluate(
+            model, val_loader, device, full_dataset if use_split else val_dataset
+        )
+        val_loss = val_metrics["loss"]
 
         elapsed = time.time() - t0
         lr_now = optimizer.param_groups[0]["lr"]
 
-        if epoch % args.print_every == 0:
-            msg = f"Epoch {epoch+1}/{args.epochs} | train_loss: {train_loss:.4f} | val_loss: {val_loss:.4f} | lr: {lr_now:.2e} | {elapsed:.1f}s"
+        log_row = {
+            "epoch": epoch + 1,
+            "train_loss": float(train_loss),
+            "val_loss": float(val_loss),
+            "val_accuracy": float(val_metrics.get("accuracy", 0.0)),
+            "val_precision": float(val_metrics.get("precision", 0.0)),
+            "val_recall": float(val_metrics.get("recall", 0.0)),
+            "val_f1": float(val_metrics.get("f1", 0.0)),
+            "val_n_samples": int(val_metrics.get("n_samples", 0)),
+            "lr": float(lr_now),
+            "elapsed_s": float(elapsed),
+        }
+        history.append(log_row)
+        save_metrics()
+
+        if (epoch + 1) % args.print_every == 0:
+            msg = (
+                f"Epoch {epoch+1}/{args.epochs} | "
+                f"train_loss: {train_loss:.4f} | val_loss: {val_loss:.4f} | "
+                f"val_acc: {val_metrics.get('accuracy', 0.0):.4f} | "
+                f"val_prec: {val_metrics.get('precision', 0.0):.4f} | "
+                f"val_rec: {val_metrics.get('recall', 0.0):.4f} | "
+                f"val_f1: {val_metrics.get('f1', 0.0):.4f} | "
+                f"lr: {lr_now:.2e} | {elapsed:.1f}s"
+            )
             print(msg)
 
-        # -- checkpoint --
         if (epoch + 1) % args.save_every == 0:
             ckpt_path = os.path.join(args.save_dir, f"epoch_{epoch+1}.pt")
-            save_checkpoint(model, optimizer, scheduler, scaler, epoch, train_loss, ckpt_path)
+            save_checkpoint(
+                model, optimizer, scheduler, scaler, epoch, train_loss, ckpt_path
+            )
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_path = os.path.join(args.save_dir, "best.pt")
-            save_checkpoint(model, optimizer, scheduler, scaler, epoch, val_loss, best_path)
+            save_checkpoint(
+                model, optimizer, scheduler, scaler, epoch, val_loss, best_path
+            )
+            with open(os.path.join(args.save_dir, "best_metrics.json"), "w") as f:
+                json.dump({**log_row, **val_metrics}, f, indent=2)
+
+        if val_metrics.get("f1", 0.0) > best_val_f1:
+            best_val_f1 = val_metrics.get("f1", 0.0)
+            with open(os.path.join(args.save_dir, "best_f1_metrics.json"), "w") as f:
+                json.dump({**log_row, **val_metrics}, f, indent=2)
+
+    save_metrics()
 
     # -- final save --
     final_path = os.path.join(args.save_dir, "final.pt")

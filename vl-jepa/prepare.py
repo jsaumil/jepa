@@ -1,4 +1,3 @@
-import os
 import csv
 import torch
 import random
@@ -57,32 +56,40 @@ class DeepFakeDataset(Dataset):
         self, csv_stem: str, file_path: str
     ) -> Optional[Path]:
         video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
-        rel = Path(file_path.strip())
+        raw_path = file_path.strip().replace("\\", "/")
+        rel = Path(raw_path)
         video_stem = rel.stem
-        rel_parts = rel.parts[:-1]
+        folder = self.videos_dir / csv_stem
+        candidates: List[Path] = []
 
-        candidate_subdirs: List[Path] = []
-        if rel_parts:
-            candidate_subdirs.append(self.videos_dir / Path(*rel_parts))
-        candidate_subdirs.append(self.videos_dir / csv_stem)
+        # CSV paths are commonly relative to the dataset folder or to the
+        # folder represented by the CSV filename.
+        if rel.is_absolute():
+            candidates.append(rel)
+        else:
+            candidates.extend([
+                folder / rel,
+                self.videos_dir / rel,
+                folder / rel.name,
+                self.videos_dir / rel.name,
+            ])
 
-        candidate_subdirs.extend([
-            self.videos_dir / "original" / csv_stem,
-            self.videos_dir / "Original" / csv_stem,
-            self.videos_dir / "original" / Path(*rel_parts) if rel_parts else self.videos_dir / "original",
-            self.videos_dir,
-        ])
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+            if candidate.suffix.lower() not in video_exts:
+                for ext in video_exts:
+                    with_ext = candidate.with_suffix(ext)
+                    if with_ext.is_file():
+                        return with_ext
 
-        seen = set()
-        for subdir in candidate_subdirs:
-            key = str(subdir)
-            if key in seen:
-                continue
-            seen.add(key)
-            for ext in video_exts:
-                candidate = subdir / f"{video_stem}{ext}"
-                if candidate.exists():
-                    return candidate
+        # Fall back to a stem search, but prefer the CSV's matching folder so
+        # duplicate filenames from different dataset parts are not mixed.
+        for ext in video_exts:
+            matches = list(folder.glob(f"**/{video_stem}{ext}")) if folder.is_dir() else []
+            if matches:
+                matches.sort()
+                return matches[0]
 
         for ext in video_exts:
             matches = list(self.videos_dir.glob(f"**/{video_stem}{ext}"))
@@ -112,6 +119,16 @@ class DeepFakeDataset(Dataset):
 
                     label = label.strip().upper()
 
+                    if label in ("FAKE", "1", "TRUE", "YES", "1.0", "T"):
+                        label_id = 1
+                    elif label in ("REAL", "0", "FALSE", "NO", "0.0", "F", "ORIGINAL", "PRISTINE"):
+                        label_id = 0
+                    else:
+                        print(
+                            f"Warning: unknown label '{label}' in '{csv_file.name}', skipping"
+                        )
+                        continue
+
                     video_path = self._resolve_video_path(csv_stem, file_path)
                     if video_path is None:
                         print(
@@ -123,6 +140,7 @@ class DeepFakeDataset(Dataset):
                     samples.append({
                         "video_path": str(video_path),
                         "label": label,
+                        "label_id": label_id,
                     })
 
         return samples
@@ -166,8 +184,9 @@ class DeepFakeDataset(Dataset):
         elif label_norm in ("REAL", "0", "FALSE", "NO", "0.0", "F", "ORIGINAL", "PRISTINE"):
             text = "not fake"
         else:
-            text = "not fake"
+            raise ValueError(f"Unsupported label: {label}")
         tokens = self.enc.encode(text)
+        tokens = tokens[: self.max_label_len]
         return torch.tensor(tokens, dtype=torch.long)
 
     def __len__(self) -> int:
@@ -182,23 +201,31 @@ class DeepFakeDataset(Dataset):
 
         x = torch.stack(frames, dim=1)  # [C, T, H, W]
 
-        query = self.query_tokens.clone()
+        query = self.query_tokens[: self.max_query_len].clone()
         label_tokens = self._tokenize_label(sample["label"])
 
         return {
             "x": x,
             "query": query,
             "y": label_tokens,
+            "label": torch.tensor(sample["label_id"], dtype=torch.long),
         }
 
 
 def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
     max_q = max(item["query"].shape[0] for item in batch)
-    max_y = max(item["y"].shape[0] for item in batch)
     max_t = max(item["x"].shape[1] for item in batch)
+    # PatchEmbed3D uses a 2-frame tubelet and 16x16 spatial patches.
+    # The model predicts one target embedding per resulting visual token.
+    max_t = max(2, ((max_t + 1) // 2) * 2)
+    patch_tokens = (max_t // 2) * (batch[0]["x"].shape[2] // 16) * (
+        batch[0]["x"].shape[3] // 16
+    )
 
     queries = []
     labels = []
+    label_ids = []
+    label_lengths = []
     images = []
 
     for item in batch:
@@ -209,8 +236,7 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         q_padded = torch.zeros(max_q, dtype=torch.long)
         q_padded[: q.shape[0]] = q
 
-        y_padded = torch.zeros(max_y, dtype=torch.long)
-        y_padded[: y.shape[0]] = y
+        y_padded = y.repeat((patch_tokens + y.shape[0] - 1) // y.shape[0])[:patch_tokens]
 
         C, T_i, H, W = x.shape
         if T_i < max_t:
@@ -219,12 +245,16 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
 
         queries.append(q_padded)
         labels.append(y_padded)
+        label_ids.append(item["label"])
+        label_lengths.append(torch.tensor(patch_tokens, dtype=torch.long))
         images.append(x)
 
     return {
         "x": torch.stack(images),
         "query": torch.stack(queries),
         "y": torch.stack(labels),
+        "label": torch.stack(label_ids),
+        "y_length": torch.stack(label_lengths),
     }
 
 
@@ -257,7 +287,7 @@ def create_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        drop_last=True,
+        drop_last=False,
         collate_fn=collate_fn,
     )
 
