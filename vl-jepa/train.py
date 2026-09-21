@@ -139,7 +139,7 @@ def evaluate(model, dataloader, device, dataset, max_batches=None):
         n_total = len(dataloader) if not max_batches else min(len(dataloader), max_batches)
     except TypeError:
         n_total = "?"
-    print(f"Validating on {n_total} batches...", flush=True)
+    # print(f"Validating on {n_total} batches...", flush=True)
 
     for i, batch in enumerate(dataloader):
         if max_batches and i >= max_batches:
@@ -160,7 +160,7 @@ def evaluate(model, dataloader, device, dataset, max_batches=None):
             all_preds.append(preds)
             all_labels.append(labels)
 
-        print(f"val batch {i + 1}/{n_total} completed, took {time.time() - t_b:.2f} sec", flush=True)
+        # print(f"val batch {i + 1}/{n_total} completed, took {time.time() - t_b:.2f} sec", flush=True)
 
     avg_loss = total_loss / max(n_batches, 1)
     metrics = {"loss": avg_loss, "accuracy": 0.0, "precision": 0.0,
@@ -224,7 +224,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, arg
         n_batches += 1
 
         now = time.time()
-        print(f"batch {i + 1} completed, took {now - batch_start:.2f} sec")
+        # print(f"batch {i + 1} completed, took {now - batch_start:.2f} sec")
         batch_start = now
 
     return total_loss / max(n_batches, 1)
