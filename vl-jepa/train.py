@@ -180,6 +180,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, arg
     total_loss = 0.0
     n_batches = 0
     optimizer.zero_grad()
+    batch_start = time.time()
 
     for i, batch in enumerate(dataloader):
         x = batch["x"].to(device)
@@ -210,6 +211,10 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, arg
 
         total_loss += loss.item() * args.grad_accum
         n_batches += 1
+
+        now = time.time()
+        print(f"batch {i + 1} completed, took {now - batch_start:.2f} sec")
+        batch_start = now
 
     return total_loss / max(n_batches, 1)
 
