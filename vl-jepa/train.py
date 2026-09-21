@@ -116,7 +116,7 @@ def predict_labels(model, y_pred, dataset, device):
     if fake_proto is None:
         return None
 
-    y_pred_pooled = y_pred.mean(dim=1)
+    y_pred_pooled = y_pred.mean(dim=1) if y_pred.dim() == 3 else y_pred
     y_pred_norm = F.normalize(y_pred_pooled, dim=-1)
 
     sim_fake = y_pred_norm @ fake_proto
