@@ -109,10 +109,7 @@ def get_label_prototypes(model, device, dataset, max_batches=8):
 
 
 @torch.no_grad()
-def predict_labels(model, y_pred, dataset, device):
-    fake_proto, real_proto = get_label_prototypes(
-        model, device, dataset, max_batches=4
-    )
+def predict_labels(y_pred, fake_proto, real_proto):
     if fake_proto is None:
         return None
 
@@ -133,6 +130,11 @@ def evaluate(model, dataloader, device, dataset, max_batches=None):
     all_preds = []
     all_labels = []
 
+    fake_proto, real_proto = get_label_prototypes(
+        model, device, dataset, max_batches=4
+    )
+    model.eval()
+
     for i, batch in enumerate(dataloader):
         if max_batches and i >= max_batches:
             break
@@ -145,7 +147,7 @@ def evaluate(model, dataloader, device, dataset, max_batches=None):
         total_loss += loss.item()
         n_batches += 1
 
-        preds = predict_labels(model, y_pred, dataset, device)
+        preds = predict_labels(y_pred, fake_proto, real_proto)
         if preds is not None:
             labels = batch["label"].long()
             all_preds.append(preds)
