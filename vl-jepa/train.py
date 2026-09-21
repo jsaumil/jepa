@@ -135,9 +135,16 @@ def evaluate(model, dataloader, device, dataset, max_batches=None):
     )
     model.eval()
 
+    try:
+        n_total = len(dataloader) if not max_batches else min(len(dataloader), max_batches)
+    except TypeError:
+        n_total = "?"
+    print(f"Validating on {n_total} batches...", flush=True)
+
     for i, batch in enumerate(dataloader):
         if max_batches and i >= max_batches:
             break
+        t_b = time.time()
 
         x = batch["x"].to(device)
         query = batch["query"].to(device)
@@ -152,6 +159,8 @@ def evaluate(model, dataloader, device, dataset, max_batches=None):
             labels = batch["label"].long()
             all_preds.append(preds)
             all_labels.append(labels)
+
+        print(f"val batch {i + 1}/{n_total} completed, took {time.time() - t_b:.2f} sec", flush=True)
 
     avg_loss = total_loss / max(n_batches, 1)
     metrics = {"loss": avg_loss, "accuracy": 0.0, "precision": 0.0,
