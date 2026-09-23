@@ -243,7 +243,11 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, loss, path):
 
 def load_checkpoint(path, model, optimizer, scheduler, scaler):
     ckpt = torch.load(path, map_location="cpu")
-    model.load_state_dict(ckpt["model_state_dict"])
+    missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    if missing:
+        print(f"load_checkpoint: missing keys (using init values): {missing}")
+    if unexpected:
+        print(f"load_checkpoint: unexpected keys (ignored): {unexpected}")
     optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     scheduler.load_state_dict(ckpt["scheduler_state_dict"])
     if scaler and ckpt.get("scaler_state_dict"):
