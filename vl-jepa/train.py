@@ -248,8 +248,14 @@ def load_checkpoint(path, model, optimizer, scheduler, scaler):
         print(f"load_checkpoint: missing keys (using init values): {missing}")
     if unexpected:
         print(f"load_checkpoint: unexpected keys (ignored): {unexpected}")
-    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-    scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+    if missing or unexpected:
+        # model architecture changed since this checkpoint was saved (e.g. new
+        # params) -- the old optimizer/scheduler state won't line up with the
+        # new param groups, so start those fresh rather than crashing.
+        print("load_checkpoint: model shape changed, skipping optimizer/scheduler state (starting fresh)")
+    else:
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
     if scaler and ckpt.get("scaler_state_dict"):
         scaler.load_state_dict(ckpt["scaler_state_dict"])
     return ckpt["epoch"], ckpt["loss"]
