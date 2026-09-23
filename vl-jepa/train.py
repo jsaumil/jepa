@@ -200,13 +200,32 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, arg
 
         if args.amp:
             with autocast(device_type="cuda"):
-                _, loss = model(x, query, y, train=True)
+                y_pred, loss = model(x, query, y, train=True)
                 loss = loss / args.grad_accum
             scaler.scale(loss).backward()
         else:
-            _, loss = model(x, query, y, train=True)
+            y_pred, loss = model(x, query, y, train=True)
             loss = loss / args.grad_accum
             loss.backward()
+
+        # DEBUG: first sign of nan/inf -- dump enough to find the cause and
+        # stop immediately instead of training 90 more epochs on garbage.
+        if not torch.isfinite(loss):
+            print(f"DEBUG NaN/Inf loss at train batch {i + 1}/{len(dataloader)}")
+            print(f"DEBUG loss={loss.item()} logit_scale={model.logit_scale.item():.4f} "
+                  f"(exp={model.logit_scale.exp().item():.4f})")
+            print(f"DEBUG y_pred: finite={torch.isfinite(y_pred).all().item()} "
+                  f"min={y_pred.min().item():.4f} max={y_pred.max().item():.4f} "
+                  f"norm_mean={y_pred.norm(dim=-1).mean().item():.4f}")
+            bad_params = [n for n, p in model.named_parameters() if not torch.isfinite(p).all()]
+            bad_grads = [n for n, p in model.named_parameters()
+                         if p.grad is not None and not torch.isfinite(p.grad).all()]
+            print(f"DEBUG params with nan/inf: {bad_params}")
+            print(f"DEBUG grads with nan/inf: {bad_grads}")
+            raise RuntimeError(
+                f"Training diverged: non-finite loss at batch {i + 1} "
+                f"(see DEBUG lines above). Stopping instead of continuing on a dead model."
+            )
 
         if (i + 1) % args.grad_accum == 0 or (i + 1) == len(dataloader):
             if args.amp:
@@ -256,6 +275,18 @@ def load_checkpoint(path, model, optimizer, scheduler, scaler):
     else:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+
+    # DEBUG: catch a checkpoint that was already nan/inf *before* we spend
+    # epochs training on top of it and finding out the hard way.
+    bad_params = [
+        name for name, p in model.named_parameters()
+        if not torch.isfinite(p).all()
+    ]
+    print(f"DEBUG load_checkpoint: path={path} saved_epoch={ckpt['epoch']} saved_loss={ckpt['loss']}")
+    if bad_params:
+        print(f"DEBUG load_checkpoint: !!! CORRUPTED CHECKPOINT, nan/inf in params: {bad_params}")
+    else:
+        print("DEBUG load_checkpoint: all params finite, checkpoint looks healthy")
     if scaler and ckpt.get("scaler_state_dict"):
         scaler.load_state_dict(ckpt["scaler_state_dict"])
     return ckpt["epoch"], ckpt["loss"]
