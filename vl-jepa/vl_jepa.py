@@ -72,13 +72,14 @@ class VLJEPA(nn.Module):
             self.encoder.eval()
         return self
 
-    def forward(self, x, query, labels=None):
+    def encode(self, x, query):
+        """x-encoder + predictor, pooled over tokens -> [B, C]"""
         encoder_frozen = not any(p.requires_grad for p in self.encoder.parameters())
-
         with torch.set_grad_enabled(torch.is_grad_enabled() and not encoder_frozen):
-            # x-encoder + predictor, pooled over tokens -> [B, C]
-            y_pred = self.encoder(x, query, None, train=False).mean(dim=1)
+            return self.encoder(x, query, None, train=False).mean(dim=1)
 
+    def forward(self, x, query, labels=None):
+        y_pred = self.encode(x, query)
         logits = self.decoder(y_pred.float())
         out = {"y_pred": y_pred, "logits": logits}
 

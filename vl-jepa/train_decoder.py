@@ -1,5 +1,6 @@
 import os
 import sys
+import copy
 import time
 import math
 import json
@@ -10,7 +11,8 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from torch.amp import GradScaler, autocast
+import torch.nn.functional as F
+from torch.amp import autocast
 from torch.utils.data import DataLoader, Subset
 
 _project_root = str(Path(__file__).resolve().parent.parent)
@@ -41,10 +43,17 @@ def parse_args():
     parser.add_argument("--hidden_dim", type=int, default=512)
     parser.add_argument("--dropout", type=float, default=0.1)
 
+    # feature caching: videos go through the frozen encoder once, the MLP
+    # then trains on the cached embeddings (no video decoding per epoch)
+    parser.add_argument("--batch_size", type=int, default=12,
+                        help="videos per batch when running the frozen encoder")
+    parser.add_argument("--cache_views", type=int, default=1,
+                        help="random frame samplings cached per train video (augmentation)")
+    parser.add_argument("--recompute_cache", action="store_true", default=False)
+
     # training
-    parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--grad_accum", type=int, default=4)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--decoder_batch_size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--warmup_epochs", type=int, default=2)
@@ -64,6 +73,7 @@ def parse_args():
 
     # logging
     parser.add_argument("--print_every", type=int, default=1)
+    parser.add_argument("--log_every_batches", type=int, default=20)
 
     return parser.parse_args()
 
@@ -95,94 +105,144 @@ def compute_metrics(preds, labels):
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, device, args):
+def extract_features(model, dataset, device, args, name):
+    """Run the frozen x-encoder + predictor over every video once -> ([N, C], [N])."""
     model.eval()
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=False,
+        collate_fn=collate_fn,
+    )
+    feats = []
+    labels = []
+    t0 = time.time()
+    for i, batch in enumerate(loader):
+        x = batch["x"].to(device, non_blocking=True)
+        query = batch["query"].to(device, non_blocking=True)
+        with autocast(device_type="cuda", enabled=args.amp):
+            y_pred = model.encode(x, query)
+        feats.append(y_pred.float().cpu())
+        labels.append(batch["label"])
+
+        if (i + 1) % args.log_every_batches == 0 or (i + 1) == len(loader):
+            elapsed = time.time() - t0
+            eta = elapsed / (i + 1) * (len(loader) - i - 1)
+            print(f"[cache {name}] batch {i + 1}/{len(loader)} | "
+                  f"{elapsed:.0f}s elapsed | eta {eta:.0f}s", flush=True)
+
+    return torch.cat(feats), torch.cat(labels).long()
+
+
+def build_feature_cache(model, train_dataset, val_dataset, device, args):
+    cache_path = os.path.join(args.save_dir, "features_cache.pt")
+    meta = {
+        "encoder_ckpt": os.path.abspath(args.encoder_ckpt),
+        "encoder_mtime": os.path.getmtime(args.encoder_ckpt),
+        "n_train": len(train_dataset),
+        "n_val": len(val_dataset),
+        "cache_views": args.cache_views,
+        "max_frames": args.max_frames,
+        "img_size": args.img_size,
+    }
+
+    if os.path.exists(cache_path) and not args.recompute_cache:
+        cache = torch.load(cache_path, map_location="cpu")
+        if cache.get("meta") == meta:
+            print(f"Loaded cached features from {cache_path}")
+            return cache
+        print("Feature cache is stale (encoder/data/settings changed), recomputing")
+
+    print(f"\nCaching encoder features ({args.cache_views} train view(s) + val)")
+    print("-" * 60)
+    train_views = []
+    train_labels = None
+    for v in range(args.cache_views):
+        f, train_labels = extract_features(
+            model, train_dataset, device, args, f"train view {v + 1}/{args.cache_views}"
+        )
+        train_views.append(f)
+    val_feats, val_labels = extract_features(model, val_dataset, device, args, "val")
+
+    cache = {
+        "meta": meta,
+        "train": torch.stack(train_views),  # [V, N, C]
+        "train_labels": train_labels,
+        "val": val_feats,  # [N, C]
+        "val_labels": val_labels,
+    }
+    torch.save(cache, cache_path)
+    print(f"Saved feature cache to {cache_path}")
+    return cache
+
+
+@torch.no_grad()
+def evaluate(decoder, feats, labels, args):
+    decoder.eval()
     total_loss = 0.0
     n_batches = 0
     all_preds = []
-    all_labels = []
 
-    for batch in dataloader:
-        x = batch["x"].to(device)
-        query = batch["query"].to(device)
-        labels = batch["label"].to(device)
-
-        with autocast(device_type="cuda", enabled=args.amp):
-            out = model(x, query, labels=labels)
-        logits = out["logits"]
-
-        total_loss += out["loss"].item()
+    for s in range(0, feats.shape[0], args.decoder_batch_size):
+        logits = decoder(feats[s: s + args.decoder_batch_size])
+        loss = F.cross_entropy(logits, labels[s: s + args.decoder_batch_size])
+        total_loss += loss.item()
         n_batches += 1
-        all_preds.append(logits.argmax(dim=-1).cpu())
-        all_labels.append(labels.cpu())
+        all_preds.append(logits.argmax(dim=-1))
 
     metrics = {"loss": total_loss / max(n_batches, 1)}
-    if all_preds:
-        metrics.update(compute_metrics(torch.cat(all_preds), torch.cat(all_labels)))
+    metrics.update(compute_metrics(torch.cat(all_preds).cpu(), labels.cpu()))
     return metrics
 
 
-def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, args):
-    model.train()  # encoder stays in eval mode (see VLJEPA.train)
-    decoder = model.decoder
+def train_one_epoch(decoder, train_views, labels, optimizer, scheduler, args):
+    decoder.train()
+    V, N, _ = train_views.shape
+    device = train_views.device
+    # each sample uses a random cached view of its video this epoch
+    view_idx = torch.randint(0, V, (N,), device=device)
+    feats = train_views[view_idx, torch.arange(N, device=device)]
+    perm = torch.randperm(N, device=device)
+
     total_loss = 0.0
     n_batches = 0
     all_preds = []
     all_labels = []
-    optimizer.zero_grad()
 
-    for i, batch in enumerate(dataloader):
-        x = batch["x"].to(device)
-        query = batch["query"].to(device)
-        labels = batch["label"].to(device)
-
-        with autocast(device_type="cuda", enabled=args.amp):
-            out = model(x, query, labels=labels)
-        logits = out["logits"]
-        loss = out["loss"]
+    for s in range(0, N, args.decoder_batch_size):
+        idx = perm[s: s + args.decoder_batch_size]
+        logits = decoder(feats[idx])
+        loss = F.cross_entropy(logits, labels[idx])
 
         if not torch.isfinite(loss):
-            raise RuntimeError(f"Training diverged: non-finite loss at batch {i + 1}")
+            raise RuntimeError(f"Training diverged: non-finite loss at batch {n_batches + 1}")
 
-        loss_scaled = loss / args.grad_accum
-        if scaler:
-            scaler.scale(loss_scaled).backward()
-        else:
-            loss_scaled.backward()
-
-        if (i + 1) % args.grad_accum == 0 or (i + 1) == len(dataloader):
-            if scaler:
-                scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(decoder.parameters(), args.grad_clip)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                nn.utils.clip_grad_norm_(decoder.parameters(), args.grad_clip)
-                optimizer.step()
-            optimizer.zero_grad()
-            scheduler.step()
+        optimizer.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(decoder.parameters(), args.grad_clip)
+        optimizer.step()
+        scheduler.step()
 
         total_loss += loss.item()
         n_batches += 1
-        all_preds.append(logits.detach().argmax(dim=-1).cpu())
-        all_labels.append(labels.cpu())
+        all_preds.append(logits.detach().argmax(dim=-1))
+        all_labels.append(labels[idx])
 
-    metrics = {
-        "loss": total_loss / max(n_batches, 1),
-    }
-    if all_preds:
-        metrics.update(compute_metrics(torch.cat(all_preds), torch.cat(all_labels)))
+    metrics = {"loss": total_loss / max(n_batches, 1)}
+    metrics.update(compute_metrics(torch.cat(all_preds).cpu(), torch.cat(all_labels).cpu()))
     return metrics
 
 
-def save_checkpoint(model, optimizer, scheduler, scaler, epoch, loss, path, args):
+def save_checkpoint(model, optimizer, scheduler, epoch, loss, path, args):
     # full VL-JEPA (encoder + MLP) so the checkpoint is usable on its own for inference
     torch.save({
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
-        "scaler_state_dict": scaler.state_dict() if scaler else None,
         "loss": loss,
         "encoder_ckpt": args.encoder_ckpt,
         "model_config": {
@@ -195,26 +255,12 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, loss, path, args
     }, path)
 
 
-def load_checkpoint(path, model, optimizer, scheduler, scaler):
+def load_checkpoint(path, model, optimizer, scheduler):
     ckpt = torch.load(path, map_location="cpu")
     model.load_state_dict(ckpt["model_state_dict"])
     optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-    if scaler and ckpt.get("scaler_state_dict"):
-        scaler.load_state_dict(ckpt["scaler_state_dict"])
     return ckpt["epoch"], ckpt["loss"]
-
-
-def make_loader(dataset, args, shuffle):
-    return DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=shuffle,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=False,
-        collate_fn=collate_fn,
-    )
 
 
 def main():
@@ -243,8 +289,11 @@ def main():
         indices = list(range(n))
         random.seed(42)
         random.shuffle(indices)
+        # val uses evenly spaced frames (deterministic), train uses random frames
+        val_base = copy.copy(full_dataset)
+        val_base.is_train = False
         train_dataset = Subset(full_dataset, indices[:n_train])
-        val_dataset = Subset(full_dataset, indices[n_train:])
+        val_dataset = Subset(val_base, indices[n_train:])
         print(f"Train: {n_train} samples | Val: {n_val} samples (split={args.val_split})")
     else:
         train_dataset = full_dataset
@@ -257,14 +306,8 @@ def main():
         )
         print(f"Train: {len(train_dataset)} samples | Val: {len(val_dataset)} samples (separate)")
 
-    train_loader = make_loader(train_dataset, args, shuffle=True)
-    val_loader = make_loader(val_dataset, args, shuffle=False)
-    print(f"Train batches: {len(train_loader)} | Val batches: {len(val_loader)}")
-
-    if len(train_loader) == 0:
-        raise ValueError(
-            "No training batches were created. Reduce --batch_size or provide more data."
-        )
+    if len(train_dataset) == 0:
+        raise ValueError("No training samples found.")
 
     # -- full VL-JEPA model: frozen encoder from best.pt + trainable MLP --
     model = VLJEPA(
@@ -284,6 +327,16 @@ def main():
     print(f"Encoder params: {n_enc:.2f}M (frozen, trainable={n_enc_trainable})")
     print(f"Decoder params: {n_dec:.3f}M (trainable)")
 
+    os.makedirs(args.save_dir, exist_ok=True)
+
+    # -- encoder features: computed once, reused for every epoch --
+    cache = build_feature_cache(model, train_dataset, val_dataset, device, args)
+    train_views = cache["train"].to(device)
+    train_labels = cache["train_labels"].to(device)
+    val_feats = cache["val"].to(device)
+    val_labels = cache["val_labels"].to(device)
+    print(f"Train features: {tuple(train_views.shape)} | Val features: {tuple(val_feats.shape)}")
+
     # -- optimizer: decoder params only --
     optimizer = torch.optim.AdamW(
         model.decoder.parameters(),
@@ -292,24 +345,19 @@ def main():
         betas=(0.9, 0.999),
     )
 
-    updates_per_epoch = math.ceil(len(train_loader) / max(args.grad_accum, 1))
+    updates_per_epoch = math.ceil(train_views.shape[1] / args.decoder_batch_size)
     total_steps = updates_per_epoch * args.epochs
     warmup_steps = updates_per_epoch * args.warmup_epochs
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
-
-    scaler = GradScaler("cuda", enabled=True) if args.amp else None
 
     # -- resume --
     start_epoch = 0
     best_val_loss = float("inf")
     best_val_f1 = -1.0
     if args.resume and os.path.exists(args.resume):
-        start_epoch, _ = load_checkpoint(args.resume, model, optimizer, scheduler, scaler)
+        start_epoch, _ = load_checkpoint(args.resume, model, optimizer, scheduler)
         start_epoch += 1
         print(f"Resumed from {args.resume}, epoch {start_epoch}")
-
-    # -- save dir --
-    os.makedirs(args.save_dir, exist_ok=True)
 
     metrics_path_json = os.path.join(args.save_dir, "metrics.json")
     metrics_path_csv = os.path.join(args.save_dir, "metrics.csv")
@@ -345,9 +393,9 @@ def main():
         t0 = time.time()
 
         train_metrics = train_one_epoch(
-            model, train_loader, optimizer, scheduler, scaler, device, args
+            model.decoder, train_views, train_labels, optimizer, scheduler, args
         )
-        val_metrics = evaluate(model, val_loader, device, args)
+        val_metrics = evaluate(model.decoder, val_feats, val_labels, args)
         train_loss = train_metrics["loss"]
         val_loss = val_metrics["loss"]
 
@@ -389,29 +437,23 @@ def main():
                 f"val_f1: {log_row['val_f1']:.4f} | "
                 f"lr: {lr_now:.2e} | {elapsed:.1f}s"
             )
-            print(msg)
+            print(msg, flush=True)
 
         if (epoch + 1) % args.save_every == 0:
             ckpt_path = os.path.join(args.save_dir, f"epoch_{epoch+1}.pt")
-            save_checkpoint(
-                model, optimizer, scheduler, scaler, epoch, train_loss, ckpt_path, args
-            )
+            save_checkpoint(model, optimizer, scheduler, epoch, train_loss, ckpt_path, args)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_path = os.path.join(args.save_dir, "best.pt")
-            save_checkpoint(
-                model, optimizer, scheduler, scaler, epoch, val_loss, best_path, args
-            )
+            save_checkpoint(model, optimizer, scheduler, epoch, val_loss, best_path, args)
             with open(os.path.join(args.save_dir, "best_metrics.json"), "w") as f:
                 json.dump({**log_row, **{f"val_{k}": v for k, v in val_metrics.items()}}, f, indent=2)
 
         if val_metrics.get("f1", 0.0) > best_val_f1:
             best_val_f1 = val_metrics.get("f1", 0.0)
             best_f1_path = os.path.join(args.save_dir, "best_f1.pt")
-            save_checkpoint(
-                model, optimizer, scheduler, scaler, epoch, val_loss, best_f1_path, args
-            )
+            save_checkpoint(model, optimizer, scheduler, epoch, val_loss, best_f1_path, args)
             with open(os.path.join(args.save_dir, "best_f1_metrics.json"), "w") as f:
                 json.dump({**log_row, **{f"val_{k}": v for k, v in val_metrics.items()}}, f, indent=2)
 
@@ -419,9 +461,7 @@ def main():
 
     # -- final save --
     final_path = os.path.join(args.save_dir, "final.pt")
-    save_checkpoint(
-        model, optimizer, scheduler, scaler, args.epochs - 1, train_loss, final_path, args
-    )
+    save_checkpoint(model, optimizer, scheduler, args.epochs - 1, train_loss, final_path, args)
     print(f"\nTraining complete. Final VL-JEPA model saved to {final_path}")
 
 
